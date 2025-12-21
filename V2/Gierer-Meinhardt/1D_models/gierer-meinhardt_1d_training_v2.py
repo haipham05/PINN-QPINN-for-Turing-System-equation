@@ -1,0 +1,1019 @@
+"""
+Gierer-Meinhardt 1D QPINN - Training Script (Version 2)
+Reaction-Diffusion 1D Quantum Physics-Informed Neural Network
+
+This script trains three models:
+1. PINN (Pure Physics-Informed Neural Network)
+2. FNN-TE-QPINN (FNN Basis Temporal Embedding QPINN)
+3. QNN-TE-QPINN (Quantum Neural Network Temporal Embedding QPINN)
+
+Based on paper 2024112448454
+
+Domain: t ∈ [0, 1], x ∈ [0, 1]
+PDE System (Brusselator):
+    ∂u/∂t = μ ∂²u/∂x² + u²v - (ε+1)u + β
+    ∂v/∂t = μ ∂²v/∂x² - u²v + εu
+
+Initial Conditions:
+    u(x, 0) = 1 + sin(2πx)
+    v(x, 0) = 3
+
+Boundary Conditions (Dirichlet):
+    u(0, t) = u(1, t) = 1
+    v(0, t) = v(1, t) = 3
+
+Version 2 Features:
+- Plot 1: Collocation points visualization
+- Plot 2: Reference solutions (RK45)
+- Plot 3: Embedding basis functions
+- Plot 4: Training analysis for each model
+- Plot 5: Methods comparison
+
+Author: QPINN Research
+Date: 2024-2025
+"""
+
+import os
+import sys
+import json
+import time
+import pickle
+from itertools import product
+
+import torch
+import torch.nn as nn
+import pennylane as qml
+import numpy as np
+from scipy.integrate import solve_ivp
+from scipy.interpolate import RegularGridInterpolator
+import matplotlib.pyplot as plt
+import matplotlib as mpl
+
+torch.random.manual_seed(42)
+
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+class Config:
+    """Configuration class for Gierer-Meinhardt 1D QPINN"""
+    
+    # Random seed
+    SEED = 42
+    
+    # Quantum Circuit Parameters
+    N_LAYERS = 5
+    N_WIRES = 4
+    
+    # FNN Basis Parameters
+    HIDDEN_LAYERS_FNN = 2
+    NEURONS_FNN = 20
+    
+    # QNN Embedding Parameters
+    N_LAYERS_EMBED = 2
+    
+    # Domain Parameters
+    T_COLLOC_POINTS = 5
+    X_COLLOC_POINTS = 10
+    
+    # Physics Parameters (Gierer-Meinhardt)
+    D_U = 0.001
+    D_V = 0.1
+    A = 0.1
+    RHO = 0.01
+    
+    # Boundary conditions (Dirichlet)
+    U_BOUNDARY = 0.5
+    V_BOUNDARY = 1.0
+    
+    # Time domain
+    T_MIN = 0.0
+    T_MAX = 1.0
+    
+    # Spatial domain
+    X_MIN = 0.0
+    X_MAX = 1.0
+    
+    # Training Parameters
+    TRAINING_ITERATIONS = 2
+    LAMBDA_SCALE = 10.0   # Weight for IC + BC loss
+    
+    # Output directory
+    BASE_DIR = "result"
+    OUTPUT_DIR = "result"
+
+
+# ============================================================
+# REFERENCE SOLUTION GENERATOR
+# ============================================================
+
+def generate_reference_solution(config, save_path="gierer_meinhardt_reference_solution.npy"):
+    """Generate 1D Gierer-Meinhardt reference solution using RK45 solver"""
+    
+    print("=== Generating 1D Reference Solution ===")
+    
+    # Spatial domain
+    Nx = 400
+    x = np.linspace(config.X_MIN, config.X_MAX, Nx)
+    dx = x[1] - x[0]
+    
+    # Time domain
+    t_start, t_end = config.T_MIN, config.T_MAX
+    Nt = 401
+    t_eval = np.linspace(t_start, t_end, Nt)
+    
+    # Initial conditions from paper
+    u0 = 0.5 + 0.1 * np.sin(2 * np.pi * x)
+v0 = np.ones(Nx) * 1.0
+    u0 = np.clip(u0, 0.0, None)
+    v0 = np.clip(v0, 0.0, None)
+    y0 = np.concatenate([u0, v0])
+    
+    def laplacian_1d(u, dx, bc='dirichlet'):
+        d2 = np.zeros_like(u)
+        d2[1:-1] = (u[2:] - 2*u[1:-1] + u[:-2]) / dx**2
+        d2[0] = 0.0
+        d2[-1] = 0.0
+        return d2
+    
+    def rd_rhs(t, y):
+        """RHS for Gierer-Meinhardt system"""
+        u = y[:Nx]
+        v = y[Nx:]
+        lapU = laplacian_1d(u, dx)
+        lapV = laplacian_1d(v, dx)
+        
+        coupling_term = (u * u) * v
+        du = config.MU * lapU + coupling_term - (config.EPSILON + 1.0) * u + config.BETA
+        dv = config.MU * lapV - coupling_term + config.EPSILON * u
+        return np.concatenate([du, dv])
+    
+    print(f"Solving Gierer-Meinhardt PDE with RK45...")
+    print(f"Parameters: μ={config.MU}, ε={config.EPSILON}, β={config.BETA}")
+    
+    sol = solve_ivp(rd_rhs, [t_eval[0], t_eval[-1]], y0, t_eval=t_eval, 
+                    method='RK45', rtol=1e-6, atol=1e-9)
+    
+    t = sol.t
+    u_sol = sol.y[:Nx, :]
+    v_sol = sol.y[Nx:, :]
+    print("Status:", sol.message)
+    
+    # Build interpolators
+    print("Building interpolators...")
+    interpU = RegularGridInterpolator((t, x), u_sol.T, bounds_error=False, fill_value=None)
+    interpV = RegularGridInterpolator((t, x), v_sol.T, bounds_error=False, fill_value=None)
+    
+    print(f"Saving reference solution to '{save_path}'...")
+    np.save(save_path, {'u': interpU, 'v': interpV, 't': t, 'x': x, 
+                        'u_sol': u_sol, 'v_sol': v_sol}, allow_pickle=True)
+    
+    print(f"✓ Reference solution generated: u∈[{u_sol.min():.4f}, {u_sol.max():.4f}], "
+          f"v∈[{v_sol.min():.4f}, {v_sol.max():.4f}]")
+    
+    return interpU, interpV, t, x, u_sol, v_sol
+
+
+# ============================================================
+# NEURAL NETWORK MODELS
+# ============================================================
+
+class FNNBasisNet(nn.Module):
+    """FNN network to generate basis for quantum circuit encoding"""
+    
+    def __init__(self, n_hidden_layers, width, output_dim, input_dim=2):
+        super().__init__()
+        self.n_hidden_layers = n_hidden_layers
+        layers = [nn.Linear(input_dim, width)]
+        for _ in range(n_hidden_layers - 1):
+            layers.append(nn.Linear(width, width))
+        layers.append(nn.Linear(width, output_dim))
+        self.layers = nn.ModuleList(layers)
+    
+    def forward(self, x):
+        for i in range(self.n_hidden_layers):
+            x = torch.tanh(self.layers[i](x))
+        return self.layers[-1](x)
+
+
+class QNNEmbedding(nn.Module):
+    """Quantum Neural Network for embedding generation (dual-circuit approach)"""
+    
+    def __init__(self, n_wires, n_layers, output_dim, input_dim=2):
+        super().__init__()
+        self.n_wires = n_wires
+        self.n_layers = n_layers
+        self.output_dim = output_dim
+        self.input_dim = input_dim
+        
+        self.weights_embed = nn.Parameter(
+            torch.randn(n_layers, n_wires, 3, requires_grad=True)
+        )
+        
+        self.dev = qml.device("default.qubit", wires=n_wires)
+        self.qnode_embed = qml.QNode(
+            self._circuit_embed,
+            self.dev,
+            interface="torch",
+            diff_method="best"
+        )
+    
+    def _circuit_embed(self, x, weights):
+        """Embedding circuit for 1D input (t, x)"""
+        for layer in range(self.n_layers):
+            for i in range(self.n_wires):
+                if i % 2 == 0:
+                    qml.RX(x[0], wires=i)  # t
+                else:
+                    qml.RY(x[1], wires=i)  # x
+            for i in range(self.n_wires):
+                qml.RX(weights[layer, i, 0], wires=i)
+                qml.RY(weights[layer, i, 1], wires=i)
+                qml.RZ(weights[layer, i, 2], wires=i)
+            if self.n_wires > 1:
+                for i in range(self.n_wires - 1):
+                    qml.CNOT(wires=[i, i + 1])
+        return [qml.expval(qml.PauliZ(i)) for i in range(self.output_dim)]
+    
+    def forward(self, x):
+        x_t = x.T
+        basis_t = self.qnode_embed(x_t, self.weights_embed)
+        if isinstance(basis_t, list):
+            basis_t = torch.stack(basis_t) * torch.pi
+        else:
+            basis_t = basis_t * torch.pi
+        return basis_t.T
+
+
+# ============================================================
+# TRAINER CLASS
+# ============================================================
+
+class GiererMeinhardt1DQPINNTrainer:
+    """Trainer class for Gierer-Meinhardt 1D QPINN models"""
+    
+    def __init__(self, config, device):
+        self.config = config
+        self.device = device
+        self.domain_bounds = torch.tensor(
+            [[config.T_MIN, config.T_MAX], [config.X_MIN, config.X_MAX]],
+            device=device, dtype=torch.float32
+        )
+        self.domain_min = torch.tensor([config.T_MIN, config.X_MIN], device=device)
+        self.domain_max = torch.tensor([config.T_MAX, config.X_MAX], device=device)
+        
+        # Generate collocation points
+        self._setup_collocation_points()
+        
+        # Load reference solution
+        self._load_reference_solution()
+        
+        # Store training results
+        self.training_results = {}
+        
+        # Reference data for plotting
+        self.ref_t = None
+        self.ref_x = None
+        self.ref_u_sol = None
+        self.ref_v_sol = None
+    
+    def _setup_collocation_points(self):
+        """Setup collocation points for training"""
+        t_torch = torch.linspace(self.config.T_MIN, self.config.T_MAX, self.config.T_COLLOC_POINTS)
+        x_torch = torch.linspace(self.config.X_MIN, self.config.X_MAX, self.config.X_COLLOC_POINTS)
+        
+        # Store unique values for visualization
+        self.T_unique = t_torch.cpu().numpy()
+        self.X_unique = x_torch.cpu().numpy()
+        
+        domain = torch.tensor(list(product(t_torch, x_torch)), dtype=torch.float32)
+        
+        # Initial condition mask (t = 0)
+        init_val_mask = domain[:, 0] == self.config.T_MIN
+        self.init_val_colloc = domain[init_val_mask].clone().detach().requires_grad_(True).to(self.device)
+        
+        # Boundary mask (x = 0 or x = 1)
+        boundary_mask = (domain[:, 1] == self.config.X_MIN) | (domain[:, 1] == self.config.X_MAX)
+        self.boundary_colloc = domain[boundary_mask & ~init_val_mask].clone().detach().requires_grad_(True).to(self.device)
+        
+        # Interior points
+        interior_mask = ~(init_val_mask | boundary_mask)
+        self.interior_colloc = domain[interior_mask].clone().detach().requires_grad_(True).to(self.device)
+        
+        # Full domain
+        self.input_domain = domain.clone().detach().requires_grad_(True).to(self.device)
+        
+        # High-res IC points
+        Nx = 400
+        x_ic_np = np.linspace(self.config.X_MIN, self.config.X_MAX, Nx)
+        self.u0_ic = 1.0 + np.sin(2.0 * np.pi * x_ic_np)
+        self.v0_ic = np.ones(Nx) * 3.0
+        
+        x_ic_torch = torch.tensor(x_ic_np, device=self.device).float().view(-1, 1)
+        t_ic_torch = torch.full_like(x_ic_torch, self.config.T_MIN)
+        self.ic_points_highres = torch.cat([t_ic_torch, x_ic_torch], dim=1)
+        
+        print(f"✓ Collocation points: Interior={len(self.interior_colloc)}, "
+              f"Boundary={len(self.boundary_colloc)}, IC={len(self.init_val_colloc)}")
+    
+    def _load_reference_solution(self):
+        """Load or generate reference solution"""
+        ref_path = os.path.join(self.config.BASE_DIR, "brusselator_reference_solution.npy")
+        
+        if os.path.exists(ref_path):
+            print(f"Loading reference solution from {ref_path}")
+            loaded = np.load(ref_path, allow_pickle=True)[()]
+            self.interp_u = loaded['u']
+            self.interp_v = loaded['v']
+            self.ref_t = loaded['t']
+            self.ref_x = loaded['x']
+            self.ref_u_sol = loaded['u_sol']
+            self.ref_v_sol = loaded['v_sol']
+        else:
+            os.makedirs(self.config.BASE_DIR, exist_ok=True)
+            self.interp_u, self.interp_v, self.ref_t, self.ref_x, self.ref_u_sol, self.ref_v_sol = \
+                generate_reference_solution(self.config, ref_path)
+        
+        # Compute reference on domain
+        domain_np = self.input_domain.detach().cpu().numpy()
+        ref_u = np.array([self.interp_u([pt[0], pt[1]]).squeeze() for pt in domain_np])
+        ref_v = np.array([self.interp_v([pt[0], pt[1]]).squeeze() for pt in domain_np])
+        
+        self.reference_u = torch.tensor(ref_u, device=self.device, dtype=torch.float32)
+        self.reference_v = torch.tensor(ref_v, device=self.device, dtype=torch.float32)
+        
+        print(f"✓ Reference solution loaded: u∈[{self.reference_u.min():.4f}, {self.reference_u.max():.4f}], "
+              f"v∈[{self.reference_v.min():.4f}, {self.reference_v.max():.4f}]")
+    
+    def _create_circuit(self):
+        """Create the main quantum circuit for TE-QPINN"""
+        dev = qml.device("default.qubit", wires=self.config.N_WIRES)
+        
+        @qml.qnode(dev, interface="torch")
+        def circuit(x, theta, basis):
+            # Tensor encoding with basis
+            for i in range(self.config.N_WIRES):
+                if i % 2 == 0:
+                    qml.RY(basis[i] * x[0], wires=i)  # t
+                else:
+                    qml.RY(basis[i] * x[1], wires=i)  # x
+            
+            # Variational layers
+            for layer in range(self.config.N_LAYERS):
+                for qubit in range(self.config.N_WIRES):
+                    qml.RX(theta[layer, qubit, 0], wires=qubit)
+                    qml.RY(theta[layer, qubit, 1], wires=qubit)
+                    qml.RZ(theta[layer, qubit, 2], wires=qubit)
+                for qubit in range(self.config.N_WIRES - 1):
+                    qml.CNOT(wires=[qubit, qubit + 1])
+            
+            return [qml.expval(qml.PauliZ(0)), qml.expval(qml.PauliZ(1))]
+        
+        return circuit
+    
+    def _postprocess_output(self, raw_output):
+        """Scale quantum outputs to physical range"""
+        # u in [0, 4], v in [0, 4] (based on reference)
+        u_scaled = raw_output[:, 0] * 2.0 + 2.0
+        v_scaled = raw_output[:, 1] * 2.0 + 2.0
+        return torch.stack([u_scaled, v_scaled], dim=1)
+    
+    def model(self, x):
+        """Forward pass through the current model"""
+        x_rescaled = 2.0 * (x - self.domain_min) / (self.domain_max - self.domain_min) - 1.0
+        
+        if self.embedding_type == "FNN_BASIS":
+            basis = self.basis_net(x_rescaled)
+            raw = self.circuit(x_rescaled.T, self.theta, basis.T)
+            raw_stacked = torch.stack(raw).T
+            return self._postprocess_output(raw_stacked)
+        elif self.embedding_type == "QNN":
+            basis = self.qnn_embedding(x_rescaled)
+            raw = self.circuit(x_rescaled.T, self.theta, basis.T)
+            raw_stacked = torch.stack(raw).T
+            return self._postprocess_output(raw_stacked)
+        else:  # NONE (pure PINN)
+            return self.pinn(x_rescaled)
+    
+    def _create_loss_functions(self):
+        """Create loss functions for training"""
+        
+        def extract_u(multi_output):
+            return multi_output[:, 0] if multi_output.dim() > 1 else multi_output[0]
+        
+        def extract_v(multi_output):
+            return multi_output[:, 1] if multi_output.dim() > 1 else multi_output[1]
+        
+        def pde_loss():
+            pred = self.model(self.interior_colloc)
+            u = extract_u(pred)
+            v = extract_v(pred)
+            
+            # u gradients
+            grad_u = torch.autograd.grad(u.sum(), self.interior_colloc, create_graph=True, retain_graph=True)[0]
+            du_dt = grad_u[:, 0]
+            du_dx = grad_u[:, 1]
+            grad_du_dx = torch.autograd.grad(du_dx.sum(), self.interior_colloc, create_graph=True, retain_graph=True)[0]
+            d2u_dx2 = grad_du_dx[:, 1]
+            
+            # v gradients
+            grad_v = torch.autograd.grad(v.sum(), self.interior_colloc, create_graph=True, retain_graph=True)[0]
+            dv_dt = grad_v[:, 0]
+            dv_dx = grad_v[:, 1]
+            grad_dv_dx = torch.autograd.grad(dv_dx.sum(), self.interior_colloc, create_graph=True, retain_graph=True)[0]
+            d2v_dx2 = grad_dv_dx[:, 1]
+            
+            coupling = (u ** 2) * v
+            
+            # PDE residuals
+            residual_u = du_dt - self.config.MU * d2u_dx2 - coupling + (self.config.EPSILON + 1.0) * u - self.config.BETA
+            residual_v = dv_dt - self.config.MU * d2v_dx2 + coupling - self.config.EPSILON * u
+            
+            return torch.mean(residual_u ** 2) + torch.mean(residual_v ** 2)
+        
+        def initial_condition_loss():
+            pred = self.model(self.ic_points_highres)
+            u = extract_u(pred)
+            v = extract_v(pred)
+            
+            u_true = torch.tensor(self.u0_ic, device=self.device, dtype=torch.float32)
+            v_true = torch.tensor(self.v0_ic, device=self.device, dtype=torch.float32)
+            
+            return torch.mean((u - u_true) ** 2) + torch.mean((v - v_true) ** 2)
+        
+        def boundary_loss():
+            if len(self.boundary_colloc) == 0:
+                return torch.tensor(0.0, device=self.device)
+            
+            left_mask = self.boundary_colloc[:, 1] == self.config.X_MIN
+            right_mask = self.boundary_colloc[:, 1] == self.config.X_MAX
+            
+            loss = torch.tensor(0.0, device=self.device)
+            
+            if left_mask.sum() > 0:
+                pred_left = self.model(self.boundary_colloc[left_mask])
+                u_left = extract_u(pred_left)
+                v_left = extract_v(pred_left)
+                loss = loss + torch.mean((u_left - self.config.U_BOUNDARY) ** 2)
+                loss = loss + torch.mean((v_left - self.config.V_BOUNDARY) ** 2)
+            
+            if right_mask.sum() > 0:
+                pred_right = self.model(self.boundary_colloc[right_mask])
+                u_right = extract_u(pred_right)
+                v_right = extract_v(pred_right)
+                loss = loss + torch.mean((u_right - self.config.U_BOUNDARY) ** 2)
+                loss = loss + torch.mean((v_right - self.config.V_BOUNDARY) ** 2)
+            
+            return loss
+        
+        def total_loss():
+            loss_pde = pde_loss()
+            loss_ic = initial_condition_loss()
+            loss_bc = boundary_loss()
+            return loss_pde + self.config.LAMBDA_SCALE * (loss_ic + loss_bc)
+        
+        def compute_metrics():
+            pred = self.model(self.input_domain)
+            u = extract_u(pred)
+            v = extract_v(pred)
+            
+            mse_u = torch.mean((u - self.reference_u) ** 2).item()
+            mse_v = torch.mean((v - self.reference_v) ** 2).item()
+            linf_u = torch.max(torch.abs(u - self.reference_u)).item()
+            linf_v = torch.max(torch.abs(v - self.reference_v)).item()
+            
+            return {
+                'mse_u': mse_u, 'mse_v': mse_v,
+                'mse_total': mse_u + mse_v,
+                'linf_u': linf_u, 'linf_v': linf_v,
+                'linf_max': max(linf_u, linf_v)
+            }
+        
+        return total_loss, compute_metrics
+    
+    def train_model(self, embedding_type, iterations):
+        """Train a single model type"""
+        self.embedding_type = embedding_type
+        method_name = {"NONE": "PINN", "FNN_BASIS": "FNN-TE-QPINN", "QNN": "QNN-TE-QPINN"}[embedding_type]
+
+        print(f"\n{'='*70}")
+        print(f"TRAINING: {method_name}")
+        print(f"{'='*70}")
+
+        # Initialize model
+        if embedding_type == "FNN_BASIS":
+            self.theta = torch.rand(self.config.N_LAYERS, self.config.N_WIRES, 3,
+                                    device=self.device, requires_grad=True)
+            self.basis_net = FNNBasisNet(
+                self.config.HIDDEN_LAYERS_FNN,
+                self.config.NEURONS_FNN,
+                self.config.N_WIRES,
+                input_dim=2
+            ).to(self.device)
+            self.circuit = self._create_circuit()
+            params = [self.theta] + list(self.basis_net.parameters())
+
+        elif embedding_type == "QNN":
+            self.theta = torch.rand(self.config.N_LAYERS, self.config.N_WIRES, 3,
+                                    device=self.device, requires_grad=True)
+            self.qnn_embedding = QNNEmbedding(
+                self.config.N_WIRES,
+                self.config.N_LAYERS_EMBED,
+                self.config.N_WIRES,
+                input_dim=2
+            ).to(self.device)
+            self.circuit = self._create_circuit()
+            params = [self.theta] + list(self.qnn_embedding.parameters())
+
+        else:  # NONE (PINN)
+            self.pinn = FNNBasisNet(
+                self.config.HIDDEN_LAYERS_FNN,
+                self.config.NEURONS_FNN,
+                2,  # Output: u, v
+                input_dim=2
+            ).to(self.device)
+            params = list(self.pinn.parameters())
+
+        # Optimizer
+        optimizer = torch.optim.LBFGS(params, line_search_fn="strong_wolfe")
+        
+        # Loss functions
+        total_loss_fn, compute_metrics_fn = self._create_loss_functions()
+        
+        def closure():
+            optimizer.zero_grad()
+            loss = total_loss_fn()
+            loss.backward()
+            return loss
+        
+        # Training loop with separate loss tracking
+        loss_history = []
+        loss_u_history = []
+        loss_v_history = []
+        mse_u_history = []
+        mse_v_history = []
+        start_time = time.time()
+        
+        def extract_u(multi_output):
+            return multi_output[:, 0] if multi_output.dim() > 1 else multi_output[0]
+        
+        def extract_v(multi_output):
+            return multi_output[:, 1] if multi_output.dim() > 1 else multi_output[1]
+        
+        for epoch in range(iterations):
+            optimizer.step(closure)
+            current_loss = total_loss_fn().item()
+            metrics = compute_metrics_fn()
+            
+            # Compute separate losses for u and v
+            pred = self.model(self.interior_colloc)
+            u = extract_u(pred)
+            v = extract_v(pred)
+            
+            # u gradients
+            grad_u = torch.autograd.grad(u.sum(), self.interior_colloc, create_graph=True, retain_graph=True)[0]
+            du_dt = grad_u[:, 0]
+            du_dx = grad_u[:, 1]
+            grad_du_dx = torch.autograd.grad(du_dx.sum(), self.interior_colloc, create_graph=True, retain_graph=True)[0]
+            d2u_dx2 = grad_du_dx[:, 1]
+            
+            # v gradients
+            grad_v = torch.autograd.grad(v.sum(), self.interior_colloc, create_graph=True, retain_graph=True)[0]
+            dv_dt = grad_v[:, 0]
+            dv_dx = grad_v[:, 1]
+            grad_dv_dx = torch.autograd.grad(dv_dx.sum(), self.interior_colloc, create_graph=True, retain_graph=True)[0]
+            d2v_dx2 = grad_dv_dx[:, 1]
+            
+            coupling = (u ** 2) * v
+            residual_u = du_dt - self.config.MU * d2u_dx2 - coupling + (self.config.EPSILON + 1.0) * u - self.config.BETA
+            residual_v = dv_dt - self.config.MU * d2v_dx2 + coupling - self.config.EPSILON * u
+            
+            loss_u = torch.mean(residual_u ** 2).item()
+            loss_v = torch.mean(residual_v ** 2).item()
+            
+            loss_history.append(current_loss)
+            loss_u_history.append(loss_u)
+            loss_v_history.append(loss_v)
+            mse_u_history.append(metrics['mse_u'])
+            mse_v_history.append(metrics['mse_v'])
+            
+            if epoch % 10 == 0 or epoch == iterations - 1:
+                print(f"Epoch {epoch:04d} | Loss: {current_loss:.2E} | "
+                      f"MSE_u: {metrics['mse_u']:.2E} | MSE_v: {metrics['mse_v']:.2E} | "
+                      f"L∞: {metrics['linf_max']:.2E}")
+        
+        training_time = time.time() - start_time
+        final_metrics = compute_metrics_fn()
+        
+        # Get final predictions
+        with torch.no_grad():
+            final_pred = self.model(self.input_domain)
+            predictions_u = extract_u(final_pred).cpu().numpy()
+            predictions_v = extract_v(final_pred).cpu().numpy()
+        
+        print(f"\n✅ {method_name} Training completed in {training_time:.2f}s")
+        print(f"   Final Loss: {loss_history[-1]:.2E}")
+        print(f"   MSE (u): {final_metrics['mse_u']:.2E}")
+        print(f"   MSE (v): {final_metrics['mse_v']:.2E}")
+        print(f"   L∞ max: {final_metrics['linf_max']:.2E}")
+        
+        # Save results
+        self.training_results[embedding_type] = {
+            'loss_history': loss_history,
+            'loss_u_history': loss_u_history,
+            'loss_v_history': loss_v_history,
+            'mse_u_history': mse_u_history,
+            'mse_v_history': mse_v_history,
+            'predictions_u': predictions_u,
+            'predictions_v': predictions_v,
+            'final_loss': current_loss,
+            'final_loss_u': loss_u,
+            'final_loss_v': loss_v,
+            'final_metrics': final_metrics,
+            'training_time': training_time
+        }
+        
+        return loss_history, final_metrics
+    
+    def save_model(self, embedding_type, save_dir):
+        """Save trained model"""
+        folder_name = {"NONE": "pinn", "FNN_BASIS": "fnn_basis", "QNN": "qnn"}[embedding_type]
+        model_dir = os.path.join(save_dir, folder_name)
+        os.makedirs(model_dir, exist_ok=True)
+        
+        if embedding_type == "FNN_BASIS":
+            save_dict = {
+                'theta': self.theta.detach().cpu().numpy(),
+                'basis_net': self.basis_net.state_dict(),
+                'config': {
+                    'N_LAYERS': self.config.N_LAYERS,
+                    'N_WIRES': self.config.N_WIRES,
+                    'HIDDEN_LAYERS_FNN': self.config.HIDDEN_LAYERS_FNN,
+                    'NEURONS_FNN': self.config.NEURONS_FNN,
+                }
+            }
+            np.save(os.path.join(model_dir, 'model.npy'), save_dict, allow_pickle=True)
+            
+        elif embedding_type == "QNN":
+            save_dict = {
+                'theta': self.theta.detach().cpu().numpy(),
+                'qnn_embedding': self.qnn_embedding.state_dict(),
+                'config': {
+                    'N_LAYERS': self.config.N_LAYERS,
+                    'N_WIRES': self.config.N_WIRES,
+                    'N_LAYERS_EMBED': self.config.N_LAYERS_EMBED,
+                }
+            }
+            np.save(os.path.join(model_dir, 'model.npy'), save_dict, allow_pickle=True)
+            
+        else:  # PINN
+            torch.save(self.pinn.state_dict(), os.path.join(model_dir, 'model.pth'))
+        
+        # Save training results (exclude large arrays for JSON)
+        with open(os.path.join(model_dir, 'training_results.json'), 'w') as f:
+            results = {
+                'loss_history': [float(x) for x in self.training_results[embedding_type]['loss_history']],
+                'loss_u_history': [float(x) for x in self.training_results[embedding_type]['loss_u_history']],
+                'loss_v_history': [float(x) for x in self.training_results[embedding_type]['loss_v_history']],
+                'mse_u_history': [float(x) for x in self.training_results[embedding_type]['mse_u_history']],
+                'mse_v_history': [float(x) for x in self.training_results[embedding_type]['mse_v_history']],
+                'final_loss': float(self.training_results[embedding_type]['final_loss']),
+                'final_loss_u': float(self.training_results[embedding_type]['final_loss_u']),
+                'final_loss_v': float(self.training_results[embedding_type]['final_loss_v']),
+                'final_metrics': {k: float(v) for k, v in self.training_results[embedding_type]['final_metrics'].items()},
+                'training_time': float(self.training_results[embedding_type]['training_time'])
+            }
+            json.dump(results, f, indent=2)
+        
+        print(f"✓ {folder_name} model saved to {model_dir}")
+
+
+# ============================================================
+# VISUALIZATION - Version 2 Plots (1-5)
+# ============================================================
+
+class TrainingVisualizerV2:
+    """Visualization class for training results (Version 2)"""
+    
+    def __init__(self, trainer):
+        self.trainer = trainer
+        self.results = trainer.training_results
+        self.T_unique = trainer.T_unique
+        self.X_unique = trainer.X_unique
+        self.reference_u = trainer.reference_u.cpu().numpy()
+        self.reference_v = trainer.reference_v.cpu().numpy()
+        self.ref_t = trainer.ref_t
+        self.ref_x = trainer.ref_x
+        self.ref_u_sol = trainer.ref_u_sol
+        self.ref_v_sol = trainer.ref_v_sol
+    
+    def plot_collocation_points(self, save_dir="result"):
+        """Plot 1: Collocation points visualization"""
+        print("\n=== Plot 1: Collocation Points ===")
+        os.makedirs(save_dir, exist_ok=True)
+        
+        fig, ax = plt.subplots(figsize=(12, 8))
+        
+        # Get collocation points
+        interior = self.trainer.interior_colloc.cpu().numpy()
+        boundary = self.trainer.boundary_colloc.cpu().numpy()
+        ic = self.trainer.init_val_colloc.cpu().numpy()
+        
+        # Plot
+        ax.scatter(interior[:, 0], interior[:, 1], c='blue', s=100, label='Interior', alpha=0.6)
+        ax.scatter(boundary[:, 0], boundary[:, 1], c='red', s=100, label='Boundary', alpha=0.6)
+        ax.scatter(ic[:, 0], ic[:, 1], c='green', s=100, label='Initial Condition', alpha=0.6)
+        
+        ax.set_xlabel('Time t', fontsize=12)
+        ax.set_ylabel('Space x', fontsize=12)
+        ax.set_title('Collocation Points Distribution (Training Domain)', fontsize=14, fontweight='bold')
+        ax.legend(fontsize=11)
+        ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(f'{save_dir}/plot1_collocation_points.png', dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"✓ Plot 1 saved: {save_dir}/plot1_collocation_points.png")
+    
+    def plot_reference_solutions(self, save_dir="result"):
+        """Plot 2: Reference solutions (RK45)"""
+        print("\n=== Plot 2: Reference Solutions ===")
+        os.makedirs(save_dir, exist_ok=True)
+        
+        fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+        
+        # u reference
+        im1 = axes[0].contourf(self.ref_t, self.ref_x, self.ref_u_sol.T, 100, cmap='inferno')
+        axes[0].set_xlabel('Time t', fontsize=12)
+        axes[0].set_ylabel('Space x', fontsize=12)
+        axes[0].set_title('u(t,x) - Reference Solution (RK45)', fontsize=13, fontweight='bold')
+        fig.colorbar(im1, ax=axes[0], label='u')
+        
+        # v reference
+        im2 = axes[1].contourf(self.ref_t, self.ref_x, self.ref_v_sol.T, 100, cmap='viridis')
+        axes[1].set_xlabel('Time t', fontsize=12)
+        axes[1].set_ylabel('Space x', fontsize=12)
+        axes[1].set_title('v(t,x) - Reference Solution (RK45)', fontsize=13, fontweight='bold')
+        fig.colorbar(im2, ax=axes[1], label='v')
+        
+        plt.suptitle('Plot 2: Reference Solutions (High Resolution RK45)', fontsize=15, fontweight='bold')
+        plt.tight_layout()
+        plt.savefig(f'{save_dir}/plot2_reference_solutions.png', dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"✓ Plot 2 saved: {save_dir}/plot2_reference_solutions.png")
+    
+    def plot_embedding_basis(self, save_dir="result"):
+        """Plot 3: Embedding basis functions φ(t,x)·x"""
+        print("\n=== Plot 3: Embedding Basis Functions ===")
+        os.makedirs(save_dir, exist_ok=True)
+        
+        # Get basis for QNN model
+        if "QNN" not in self.trainer.training_results:
+            print("⚠ QNN model not found, skipping Plot 3")
+            return
+        
+        # Create a grid for basis evaluation
+        T_grid = np.linspace(self.trainer.config.T_MIN, self.trainer.config.T_MAX, 50)
+        X_grid = np.linspace(self.trainer.config.X_MIN, self.trainer.config.X_MAX, 50)
+        points = np.array(list(product(T_grid, X_grid)))
+        points_tensor = torch.tensor(points, dtype=torch.float32).to(self.trainer.device)
+        
+        # Setup QNN embedding if needed
+        self.trainer.embedding_type = "QNN"
+        # Create model state to get basis
+        model_state = np.load(os.path.join(self.trainer.config.BASE_DIR, "qnn/model.npy"), allow_pickle=True)[()]
+        self.trainer.theta = torch.tensor(model_state['theta'], device=self.trainer.device)
+        self.trainer.qnn_embedding = QNNEmbedding(
+            self.trainer.config.N_WIRES,
+            self.trainer.config.N_LAYERS_EMBED,
+            self.trainer.config.N_WIRES,
+            input_dim=2
+        ).to(self.trainer.device)
+        self.trainer.qnn_embedding.load_state_dict(model_state['qnn_embedding'])
+        self.trainer.qnn_embedding.eval()
+        
+        # Get basis (φ(t,x))
+        domain_min = torch.tensor([self.trainer.config.T_MIN, self.trainer.config.X_MIN], device=self.trainer.device)
+        domain_max = torch.tensor([self.trainer.config.T_MAX, self.trainer.config.X_MAX], device=self.trainer.device)
+        x_rescaled = 2.0 * (points_tensor - domain_min) / (domain_max - domain_min) - 1.0
+        
+        with torch.no_grad():
+            basis = self.trainer.qnn_embedding(x_rescaled).cpu().numpy()
+        
+        # Compute φ(t,x)·x for first N_WIRES components
+        fig, axes = plt.subplots(2, 2, figsize=(14, 12))
+        axes = axes.flatten()
+        
+        for i in range(min(4, self.trainer.config.N_WIRES)):
+            basis_product = basis[:, i] * points[:, 1]  # φ(t,x) * x
+            basis_grid = basis_product.reshape(len(T_grid), len(X_grid))
+            
+            im = axes[i].contourf(T_grid, X_grid, basis_grid.T, 50, cmap='coolwarm')
+            axes[i].set_xlabel('Time t', fontsize=11)
+            axes[i].set_ylabel('Space x', fontsize=11)
+            axes[i].set_title(f'φ(t,x)·x (Qubit {i})', fontsize=12)
+            fig.colorbar(im, ax=axes[i])
+        
+        plt.suptitle('Plot 3: Embedding Basis Functions φ(t,x)·x (QNN)', fontsize=15, fontweight='bold')
+        plt.tight_layout()
+        plt.savefig(f'{save_dir}/plot3_embedding_basis.png', dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"✓ Plot 3 saved: {save_dir}/plot3_embedding_basis.png")
+    
+    def plot_training_analysis_v2(self, save_dir="result"):
+        """Plot 4: Training analysis for each model (3x3 layout)"""
+        print("\n=== Plot 4: Training Analysis for Each Model ===")
+        os.makedirs(save_dir, exist_ok=True)
+        
+        for embedding_type in ["NONE", "FNN_BASIS", "QNN"]:
+            method_name = {"NONE": "PINN", "FNN_BASIS": "FNN-TE-QPINN", "QNN": "QNN-TE-QPINN"}[embedding_type]
+            results = self.results[embedding_type]
+            
+            fig, axes = plt.subplots(1, 3, figsize=(20, 6))
+            
+            # Column 1: Loss evolution (line chart)
+            axes[0].semilogy(results['loss_history'], 'k-', linewidth=2.5, label='Total Loss')
+            axes[0].semilogy(results['loss_u_history'], 'b--', linewidth=2, label='Loss u')
+            axes[0].semilogy(results['loss_v_history'], 'r--', linewidth=2, label='Loss v')
+            axes[0].set_xlabel('Epoch', fontsize=12)
+            axes[0].set_ylabel('Loss (log scale)', fontsize=12)
+            axes[0].set_title(f'Loss Evolution - {method_name}', fontsize=13, fontweight='bold')
+            axes[0].legend(fontsize=11, loc='best')
+            axes[0].grid(True, alpha=0.3, which='both')
+            
+            # Column 2: Predictions (heatmaps)
+            u_pred = results['predictions_u'].reshape(len(self.T_unique), len(self.X_unique))
+            v_pred = results['predictions_v'].reshape(len(self.T_unique), len(self.X_unique))
+            
+            # Create side-by-side heatmaps for u and v
+            ax_tmp = axes[1]
+            ax_tmp.axis('off')
+            
+            # Draw u and v predictions manually
+            im1 = ax_tmp.contourf(self.T_unique, self.X_unique, u_pred.T, 50, cmap='RdYlBu_r')
+            ax_tmp.set_xlabel('Time t', fontsize=11)
+            ax_tmp.set_ylabel('Space x', fontsize=11)
+            ax_tmp.set_title(f'u, v Predictions - {method_name}', fontsize=12, fontweight='bold')
+            
+            # Column 3: Absolute errors
+            u_ref = self.reference_u.reshape(len(self.T_unique), len(self.X_unique))
+            v_ref = self.reference_v.reshape(len(self.T_unique), len(self.X_unique))
+            
+            u_error = np.abs(u_pred - u_ref)
+            v_error = np.abs(v_pred - v_ref)
+            
+            im3 = axes[2].contourf(self.T_unique, self.X_unique, np.abs(u_error + v_error).T, 50, cmap='hot')
+            axes[2].set_xlabel('Time t', fontsize=12)
+            axes[2].set_ylabel('Space x', fontsize=12)
+            axes[2].set_title(f'|Error| u,v - {method_name}', fontsize=13, fontweight='bold')
+            fig.colorbar(im3, ax=axes[2], label='|Error|')
+            
+            plt.suptitle(f'Plot 4: Training Analysis - {method_name} (Brusselator 1D v2)', fontsize=14, fontweight='bold')
+            plt.tight_layout()
+            plt.savefig(f'{save_dir}/plot4_training_{embedding_type.lower()}.png', dpi=300, bbox_inches='tight')
+            plt.close()
+            
+            print(f"✓ Plot 4 for {method_name} saved: {save_dir}/plot4_training_{embedding_type.lower()}.png")
+    
+    def plot_methods_comparison_v2(self, save_dir="result"):
+        """Plot 5: Methods comparison (3 line charts)"""
+        print("\n=== Plot 5: Methods Comparison ===")
+        os.makedirs(save_dir, exist_ok=True)
+        
+        fig, axes = plt.subplots(1, 3, figsize=(20, 6))
+        
+        colors = {'NONE': 'b', 'FNN_BASIS': 'r', 'QNN': 'g'}
+        labels = {'NONE': 'PINN', 'FNN_BASIS': 'FNN-TE-QPINN', 'QNN': 'QNN-TE-QPINN'}
+        line_styles = {'NONE': '-', 'FNN_BASIS': '--', 'QNN': '-'}
+        
+        # Total Loss comparison
+        for method in ["NONE", "FNN_BASIS", "QNN"]:
+            axes[0].semilogy(self.results[method]['loss_history'], 
+                            color=colors[method], linestyle=line_styles[method], 
+                            linewidth=2.5, label=labels[method])
+        axes[0].set_xlabel('Epoch', fontsize=12)
+        axes[0].set_ylabel('Total Loss (log scale)', fontsize=12)
+        axes[0].set_title('Total Loss Comparison', fontsize=13, fontweight='bold')
+        axes[0].legend(fontsize=11, loc='best')
+        axes[0].grid(True, alpha=0.3, which='both')
+        
+        # Loss u comparison
+        for method in ["NONE", "FNN_BASIS", "QNN"]:
+            axes[1].semilogy(self.results[method]['loss_u_history'], 
+                            color=colors[method], linestyle=line_styles[method], 
+                            linewidth=2.5, label=labels[method])
+        axes[1].set_xlabel('Epoch', fontsize=12)
+        axes[1].set_ylabel('Loss u (log scale)', fontsize=12)
+        axes[1].set_title('Activator u Loss Comparison', fontsize=13, fontweight='bold')
+        axes[1].legend(fontsize=11, loc='best')
+        axes[1].grid(True, alpha=0.3, which='both')
+        
+        # Loss v comparison
+        for method in ["NONE", "FNN_BASIS", "QNN"]:
+            axes[2].semilogy(self.results[method]['loss_v_history'], 
+                            color=colors[method], linestyle=line_styles[method], 
+                            linewidth=2.5, label=labels[method])
+        axes[2].set_xlabel('Epoch', fontsize=12)
+        axes[2].set_ylabel('Loss v (log scale)', fontsize=12)
+        axes[2].set_title('Substrate v Loss Comparison', fontsize=13, fontweight='bold')
+        axes[2].legend(fontsize=11, loc='best')
+        axes[2].grid(True, alpha=0.3, which='both')
+        
+        plt.suptitle('Plot 5: Three Methods Comparison (PINN vs FNN-TE-QPINN vs QNN-TE-QPINN)', 
+                     fontsize=15, fontweight='bold')
+        plt.tight_layout()
+        plt.savefig(f'{save_dir}/plot5_methods_comparison.png', dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"✓ Plot 5 saved: {save_dir}/plot5_methods_comparison.png")
+    
+    def print_summary(self):
+        """Print summary statistics"""
+        print("\n" + "="*70)
+        print("TRAINING SUMMARY STATISTICS")
+        print("="*70)
+        print(f"\n{'Method':<20} {'Final Total Loss':<18} {'Final Loss u':<18} {'Final Loss v':<18}")
+        print("-"*70)
+        
+        for method in ["NONE", "FNN_BASIS", "QNN"]:
+            method_name = {"NONE": "PINN", "FNN_BASIS": "FNN-TE-QPINN", "QNN": "QNN-TE-QPINN"}[method]
+            results = self.results[method]
+            print(f"{method_name:<20} {results['final_loss']:<18.2E} "
+                  f"{results['final_loss_u']:<18.2E} {results['final_loss_v']:<18.2E}")
+
+
+# ============================================================
+# MAIN EXECUTION
+# ============================================================
+
+def main():
+    # Configuration
+    config = Config()
+    
+    # Device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+    
+    # Create output directory
+    os.makedirs(config.OUTPUT_DIR, exist_ok=True)
+    
+    print("\n" + "="*80)
+    print("BRUSSELATOR 1D QPINN TRAINING (VERSION 2)")
+    print("="*80)
+    print(f"Domain: t ∈ [{config.T_MIN}, {config.T_MAX}], x ∈ [{config.X_MIN}, {config.X_MAX}]")
+    print(f"Parameters: μ={config.MU}, ε={config.EPSILON}, β={config.BETA}")
+    print(f"Training iterations: {config.TRAINING_ITERATIONS}")
+    print("="*80)
+    
+    # Initialize trainer
+    trainer = Brusselator1DQPINNTrainer(config, device)
+    
+    # Train all models
+    for embedding_type in ["NONE", "FNN_BASIS", "QNN"]:
+        trainer.train_model(embedding_type, config.TRAINING_ITERATIONS)
+        trainer.save_model(embedding_type, config.OUTPUT_DIR)
+    
+    # Generate visualizations (Version 2)
+    visualizer = TrainingVisualizerV2(trainer)
+    visualizer.plot_collocation_points(config.OUTPUT_DIR)
+    visualizer.plot_reference_solutions(config.OUTPUT_DIR)
+    visualizer.plot_embedding_basis(config.OUTPUT_DIR)
+    visualizer.plot_training_analysis_v2(config.OUTPUT_DIR)
+    visualizer.plot_methods_comparison_v2(config.OUTPUT_DIR)
+    visualizer.print_summary()
+    
+    # Save combined results
+    combined_results = {}
+    for method, data in trainer.training_results.items():
+        combined_results[method] = {
+            'loss_history': [float(x) for x in data['loss_history']],
+            'loss_u_history': [float(x) for x in data['loss_u_history']],
+            'loss_v_history': [float(x) for x in data['loss_v_history']],
+            'mse_u_history': [float(x) for x in data['mse_u_history']],
+            'mse_v_history': [float(x) for x in data['mse_v_history']],
+            'final_loss': float(data['final_loss']),
+            'final_loss_u': float(data['final_loss_u']),
+            'final_loss_v': float(data['final_loss_v']),
+            'final_metrics': {k: float(v) for k, v in data['final_metrics'].items()},
+            'training_time': float(data['training_time'])
+        }
+    
+    with open(os.path.join(config.OUTPUT_DIR, 'training_summary.json'), 'w') as f:
+        json.dump(combined_results, f, indent=2)
+    
+    print("\n" + "="*80)
+    print("TRAINING COMPLETE!")
+    print("="*80)
+    print(f"Results saved to: {config.OUTPUT_DIR}/")
+    print("  - plot1_collocation_points.png")
+    print("  - plot2_reference_solutions.png")
+    print("  - plot3_embedding_basis.png")
+    print("  - plot4_training_*.png (for each model)")
+    print("  - plot5_methods_comparison.png")
+    print("  - pinn/, fnn_basis/, qnn/ (model checkpoints)")
+    print("  - training_summary.json")
+    print("="*80)
+
+
+if __name__ == "__main__":
+    main()
