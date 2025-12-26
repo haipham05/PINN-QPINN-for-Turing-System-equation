@@ -24,6 +24,118 @@ import matplotlib.pyplot as plt
 
 
 # ============================================================
+# UTILITY FUNCTIONS
+# ============================================================
+
+def count_parameters(model_components):
+    """Count total trainable parameters in model components
+    
+    Args:
+        model_components: dict with keys like 'theta', 'basis_net', 'qnn_embedding', 'pinn'
+    
+    Returns:
+        total_params: int, total number of parameters
+        param_dict: dict, breakdown of parameters by component
+    """
+    param_dict = {}
+    total_params = 0
+    
+    for name, component in model_components.items():
+        if isinstance(component, torch.Tensor):
+            # For theta tensor
+            n_params = component.numel()
+            param_dict[name] = n_params
+            total_params += n_params
+        elif isinstance(component, nn.Module):
+            # For neural network modules
+            n_params = sum(p.numel() for p in component.parameters() if p.requires_grad)
+            param_dict[name] = n_params
+            total_params += n_params
+    
+    return total_params, param_dict
+
+
+def plot_quantum_circuit(circuit_func, embedding_type, config, save_dir="result"):
+    """Plot and save quantum circuit visualization
+    
+    Args:
+        circuit_func: QNode circuit function
+        embedding_type: str, "FNN_BASIS" or "QNN"
+        config: Config object
+        save_dir: str, directory to save the plot
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    
+    method_name = {"FNN_BASIS": "FNN-TE-QPINN", "QNN": "QNN-TE-QPINN"}[embedding_type]
+    
+    # Create dummy inputs for visualization
+    x_dummy = np.random.rand(3)  # (t, x, y)
+    theta_dummy = np.random.rand(config.N_LAYERS, config.N_WIRES, 3)  # Variational parameters
+    basis_dummy = np.random.rand(config.N_WIRES)
+    
+    print(f"\n📊 Generating quantum circuit diagram for {method_name}...")
+    
+    try:
+        fig, ax = qml.draw_mpl(circuit_func)(x_dummy, theta_dummy, basis_dummy)
+        
+        # Add title
+        ax.set_title(f'{method_name} Quantum Circuit Architecture\n'
+                    f'({config.N_LAYERS} layers, {config.N_WIRES} qubits)', 
+                    fontsize=14, fontweight='bold', pad=20)
+        
+        plt.tight_layout()
+        
+        # Save figure
+        filename = f"plot3_quantum_circuit_{embedding_type.lower()}_inference.png"
+        save_path = os.path.join(save_dir, filename)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"   ✓ Main circuit diagram saved: {save_path}")
+        
+    except Exception as e:
+        print(f"   ⚠ Warning: Could not generate main circuit diagram: {e}")
+
+
+def plot_qnn_embedding_circuit(qnn_embedding, config, save_dir="result"):
+    """Plot and save QNN embedding circuit visualization
+    
+    Args:
+        qnn_embedding: QNNEmbedding module
+        config: Config object
+        save_dir: str, directory to save the plot
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    
+    print(f"\n📊 Generating QNN embedding circuit diagram...")
+    
+    try:
+        # Create dummy inputs
+        x_dummy = np.random.rand(3)  # (t, x, y)
+        
+        # Get the embedding circuit from the QNNEmbedding module
+        fig, ax = qml.draw_mpl(qnn_embedding.qnode_embed)(x_dummy, qnn_embedding.weights_embed)
+        
+        # Add title
+        ax.set_title(f'QNN Embedding Circuit Architecture\n'
+                    f'({config.N_LAYERS_EMBED} layers, {config.N_WIRES} qubits)', 
+                    fontsize=14, fontweight='bold', pad=20)
+        
+        plt.tight_layout()
+        
+        # Save figure
+        filename = "plot3_quantum_circuit_qnn_embedding_inference.png"
+        save_path = os.path.join(save_dir, filename)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"   ✓ QNN embedding circuit diagram saved: {save_path}")
+        
+    except Exception as e:
+        print(f"   ⚠ Warning: Could not generate QNN embedding circuit diagram: {e}")
+
+
+# ============================================================
 # CONFIGURATION
 # ============================================================
 
@@ -451,16 +563,16 @@ class InferenceVisualizer:
             fig.text(0.5, 0.01, stats_text, ha='center', fontsize=11, 
                     bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.8))
             
-            plt.suptitle(f'Plot 2: {method_name} Performance vs RK45 Reference (t={actual_t:.2f})', 
+            plt.suptitle(f'Plot 7: {method_name} Performance vs RK45 Reference (t={actual_t:.2f})', 
                          fontsize=16, fontweight='bold')
             plt.tight_layout(rect=[0, 0.05, 1, 0.96])
             
             # Format time for filename (e.g., t=0.5 -> t05, t=1.0 -> t10)
             t_str = f"t{t_plot:.1f}".replace(".", "")
-            plt.savefig(f'{save_dir}/plot2_{folder_name}_performance_{t_str}.png', dpi=300, bbox_inches='tight')
+            plt.savefig(f'{save_dir}/plot7_{folder_name}_performance_{t_str}.png', dpi=300, bbox_inches='tight')
             plt.close()
             
-            print(f"✓ Plot 2 for {method_name} saved: {save_dir}/plot2_{folder_name}_performance_{t_str}.png")
+            print(f"✓ Plot 7 for {method_name} saved: {save_dir}/plot7_{folder_name}_performance_{t_str}.png")
     
     def plot_time_evolution(self, save_dir="result", t_max=1.0):
         """Plot 4: Time evolution for all methods"""
@@ -509,7 +621,7 @@ class InferenceVisualizer:
             plt.suptitle(f'{component}(x,y,t) Time Evolution Comparison (Brusselator 2D, t∈[0,{t_max}])',
                         fontsize=14, fontweight='bold')
             plt.tight_layout()
-            plt.savefig(f'{save_dir}/plot4_time_evolution_{component}.png', dpi=300, bbox_inches='tight')
+            plt.savefig(f'{save_dir}/extraplot_time_evolution_{component}.png', dpi=300, bbox_inches='tight')
             plt.close()
             
             print(f"✓ Time evolution plot for {component} saved")
@@ -555,7 +667,7 @@ def main():
     inference_engine = Brusselator2DQPINNInference(config, device)
     
     # Load reference
-    ref_path = os.path.join(config.INPUT_DIR, "brusselator_2D_reference_solution.npy")
+    ref_path = os.path.join(config.INPUT_DIR, "brusselator_3d_reference_solution.npy")
     inference_engine.load_reference(ref_path)
     
     # Run inference for all models
@@ -578,13 +690,20 @@ def main():
         if os.path.exists(model_path):
             results = inference_engine.inference(model_path, embedding_type)
             embedding_results[embedding_type] = results
+            
+            # Plot quantum circuit for FNN and QNN (Plot 7)
+            if embedding_type in ["FNN_BASIS", "QNN"]:
+                if hasattr(inference_engine, 'circuit'):
+                    plot_quantum_circuit(inference_engine.circuit, embedding_type, config, config.OUTPUT_DIR)
+                if embedding_type == "QNN" and hasattr(inference_engine, 'qnn_embedding'):
+                    plot_qnn_embedding_circuit(inference_engine.qnn_embedding, config, config.OUTPUT_DIR)
         else:
             print(f"⚠ Model not found: {model_path}")
     
     # Visualizations
     visualizer = InferenceVisualizer(inference_engine, embedding_results)
-    visualizer.plot_performance_analysis(config.OUTPUT_DIR, t_plot=0.5)
-    visualizer.plot_time_evolution(config.OUTPUT_DIR, t_max=1.0)
+    visualizer.plot_performance_analysis(config.OUTPUT_DIR, t_plot=0.5)  # Plot 2
+    visualizer.plot_time_evolution(config.OUTPUT_DIR, t_max=1.0)         # Plot 4
     visualizer.print_summary()
     
     # Save results
@@ -595,6 +714,14 @@ def main():
     
     print("\n" + "="*80)
     print("INFERENCE COMPLETE!")
+    print("="*80)
+    print(f"Results saved to: {config.OUTPUT_DIR}/")
+    print("\nGenerated Plots:")
+    print("  Plot 2 - plot2_*_performance_*.png (for each model)")
+    print("  Plot 4 - plot4_time_evolution_*.png")
+    print("  Plot 7 - plot7_quantum_circuit_*.png (for FNN and QNN)")
+    print("\nOther outputs:")
+    print("  - inference_results.pkl")
     print("="*80)
 
 

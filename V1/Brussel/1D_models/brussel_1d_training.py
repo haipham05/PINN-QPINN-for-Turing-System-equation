@@ -88,7 +88,7 @@ class Config:
     X_MAX = 1.0
     
     # Training Parameters
-    TRAINING_ITERATIONS = 200
+    TRAINING_ITERATIONS = 2
     LAMBDA_SCALE = 10.0   # Weight for IC + BC loss
     
     # Output directory
@@ -130,15 +130,29 @@ def generate_reference_solution(config, save_path="brusselator_reference_solutio
         return d2
     
     def rd_rhs(t, y):
-        """RHS for Brusselator system"""
+        """RHS for Brusselator system with Dirichlet BC enforcement"""
         u = y[:Nx]
         v = y[Nx:]
+        
+        # Enforce Dirichlet BC: u=1, v=3 at boundaries
+        u[0] = config.U_BOUNDARY
+        u[-1] = config.U_BOUNDARY
+        v[0] = config.V_BOUNDARY
+        v[-1] = config.V_BOUNDARY
+        
         lapU = laplacian_1d(u, dx)
         lapV = laplacian_1d(v, dx)
         
         coupling_term = (u * u) * v
         du = config.MU * lapU + coupling_term - (config.EPSILON + 1.0) * u + config.BETA
         dv = config.MU * lapV - coupling_term + config.EPSILON * u
+        
+        # Set du/dt = 0 and dv/dt = 0 at boundaries (Dirichlet BC)
+        du[0] = 0.0
+        du[-1] = 0.0
+        dv[0] = 0.0
+        dv[-1] = 0.0
+        
         return np.concatenate([du, dv])
     
     print(f"Solving Brusselator PDE with RK45...")
@@ -165,6 +179,332 @@ def generate_reference_solution(config, save_path="brusselator_reference_solutio
           f"v∈[{v_sol.min():.4f}, {v_sol.max():.4f}]")
     
     return interpU, interpV
+
+
+# ============================================================
+# PARAMETER COUNTING
+# ============================================================
+
+def count_parameters(model_components):
+    """Count total trainable parameters in model components
+    
+    Args:
+        model_components: dict with keys like 'theta', 'basis_net', 'qnn_embedding', 'pinn'
+    
+    Returns:
+        total_params: int, total number of parameters
+        param_dict: dict, breakdown of parameters by component
+    """
+    param_dict = {}
+    total_params = 0
+    
+    for name, component in model_components.items():
+        if isinstance(component, torch.Tensor):
+            # For theta tensor
+            n_params = component.numel()
+            param_dict[name] = n_params
+            total_params += n_params
+        elif isinstance(component, nn.Module):
+            # For neural network modules
+            n_params = sum(p.numel() for p in component.parameters() if p.requires_grad)
+            param_dict[name] = n_params
+            total_params += n_params
+    
+    return total_params, param_dict
+
+
+# ============================================================
+# PLOTTING FUNCTIONS
+# ============================================================
+
+def plot_collocation_points_1d(config, save_dir="result"):
+    """
+    Plot 1: Collocation Points Distribution (1D version)
+    Single subplot showing IC, BC, and Interior points with different colors
+    Adapted to match rd_2d_qpinn.py visual style
+    """
+    print("\n=== Plot 1: Collocation Points Distribution ===")
+    
+    # Create collocation points
+    t_points = np.linspace(config.T_MIN, config.T_MAX, config.T_COLLOC_POINTS)
+    x_points = np.linspace(config.X_MIN, config.X_MAX, config.X_COLLOC_POINTS)
+    
+    # 1. Initial Condition Points: All x at t=T_MIN
+    t_ic = np.array([config.T_MIN])
+    ic_points = np.column_stack([np.full(len(x_points), config.T_MIN), x_points])
+    
+    # 2. Boundary Condition Points: Random points at x=0 or x=1 for t > T_MIN
+    N_bc = config.T_COLLOC_POINTS * config.X_COLLOC_POINTS
+    
+    bc_t = np.random.uniform(config.T_MIN, config.T_MAX, N_bc)
+    bc_x_min = np.column_stack([bc_t[:N_bc//2], np.full(N_bc//2, config.X_MIN)])
+    bc_x_max = np.column_stack([bc_t[N_bc//2:], np.full(N_bc - N_bc//2, config.X_MAX)])
+    bc_points = np.vstack([bc_x_min, bc_x_max])
+    
+    # 3. Interior Points: Random sampling in the interior
+    full_domain = np.array(list(product(t_points, x_points)))
+    ic_mask = full_domain[:, 0] == config.T_MIN
+    bc_mask = (
+        ((full_domain[:, 1] == config.X_MIN) | (full_domain[:, 1] == config.X_MAX)) &
+        (full_domain[:, 0] != config.T_MIN)
+    )
+    interior_mask = ~(ic_mask | bc_mask)
+    interior_points = full_domain[interior_mask]
+    
+    # Create single subplot
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    # Plot IC points (red) - matching rd_2d_qpinn.py style
+    if len(ic_points) > 0:
+        ax.scatter(ic_points[:, 0], ic_points[:, 1], c="r", s=1, alpha=0.6, label="Initial Condition", zorder=3)
+    
+    # Plot BC points (blue)
+    if len(bc_points) > 0:
+        ax.scatter(bc_points[:, 0], bc_points[:, 1], c="blue", s=1, alpha=0.3, label="Boundary", zorder=2)
+    
+    # Plot Interior points (black)
+    if len(interior_points) > 0:
+        sample_idx = np.random.choice(interior_points.shape[0], min(5000, interior_points.shape[0]), replace=False)
+        ax.scatter(interior_points[sample_idx, 0], interior_points[sample_idx, 1], c="black", s=1, alpha=0.1, label="Interior", zorder=1)
+    
+    ax.set_xlabel("t")
+    ax.set_ylabel("x")
+    ax.set_title("Collocation Points Distribution (IC, BC, Interior)")
+    ax.legend()
+    
+    plt.tight_layout()
+    
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, 'plot1_collocation_points.png')
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+    
+    print(f"✓ Plot 1 saved: {save_path}")
+    print(f"  IC points: {len(ic_points)}")
+    print(f"  BC points: {len(bc_points)}")
+    print(f"  Interior points: {len(interior_points)}")
+    print(f"  Total: {len(ic_points) + len(bc_points) + len(interior_points)}")
+
+
+def plot_reference_solution(t, x, u_sol, v_sol, save_dir="result"):
+    """
+    Plot 2: Reference Solution from RK45
+    2D heatmaps (t-x plane) for u and v
+    
+    Args:
+        t: Time array (Nt,)
+        x: Space array (Nx,)
+        u_sol: Solution array of shape (Nx, Nt)
+        v_sol: Solution array of shape (Nx, Nt)
+    """
+    print("\n" + "="*60)
+    print("Generating Plot 2: Reference Solution (RK45)")
+    print("="*60)
+    
+    # Create figure with 1 row × 2 columns (u and v heatmaps)
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+    
+    # Create meshgrid for heatmaps (T, X both need to match data dimensions)
+    # u_sol and v_sol have shape (Nx, Nt)
+    T_grid, X_grid = np.meshgrid(t, x)  # This creates (Nx, Nt) grids
+    
+    # Heatmap 1: u(t, x)
+    im1 = axes[0].pcolormesh(T_grid, X_grid, u_sol, shading='auto', cmap='inferno')
+    axes[0].set_xlabel('Time (t)', fontsize=12, fontweight='bold')
+    axes[0].set_ylabel('Space (x)', fontsize=12, fontweight='bold')
+    axes[0].set_title('u(t,x) - Activator (Reference)', fontsize=13, fontweight='bold')
+    cbar1 = fig.colorbar(im1, ax=axes[0], label='u')
+    
+    # Heatmap 2: v(t, x)
+    im2 = axes[1].pcolormesh(T_grid, X_grid, v_sol, shading='auto', cmap='viridis')
+    axes[1].set_xlabel('Time (t)', fontsize=12, fontweight='bold')
+    axes[1].set_ylabel('Space (x)', fontsize=12, fontweight='bold')
+    axes[1].set_title('v(t,x) - Substrate (Reference)', fontsize=13, fontweight='bold')
+    cbar2 = fig.colorbar(im2, ax=axes[1], label='v')
+    
+    plt.suptitle('Plot 2: Reference Solution (RK45) - 1D Brusselator', 
+                 fontsize=15, fontweight='bold')
+    plt.tight_layout()
+    
+    # Save
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, 'plot2_reference_solution.png')
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    print(f"✓ Plot 2 saved: {save_path}")
+    print(f"  u range: [{u_sol.min():.4f}, {u_sol.max():.4f}]")
+    print(f"  v range: [{v_sol.min():.4f}, {v_sol.max():.4f}]")
+    print("="*60)
+
+
+def plot_quantum_circuit(circuit_func, embedding_type, config, save_dir="result"):
+    """Plot and save quantum circuit visualization"""
+    os.makedirs(save_dir, exist_ok=True)
+    
+    method_name = {"FNN_BASIS": "FNN-TE-QPINN", "QNN": "QNN-TE-QPINN"}[embedding_type]
+    
+    # Create dummy inputs for visualization
+    x_dummy = np.random.rand(2)  # (t, x)
+    theta_dummy = np.random.rand(config.N_LAYERS, config.N_WIRES, 3)
+    basis_dummy = np.random.rand(config.N_WIRES)
+    
+    print(f"\n📊 Generating quantum circuit diagram for {method_name}...")
+    
+    try:
+        fig, ax = qml.draw_mpl(circuit_func)(x_dummy, theta_dummy, basis_dummy)
+        
+        ax.set_title(f'{method_name} Quantum Circuit Architecture\n'
+                    f'({config.N_LAYERS} layers, {config.N_WIRES} qubits)', 
+                    fontsize=12, fontweight='bold', pad=15)
+        
+        plt.tight_layout()
+        
+        filename = f"plot3_quantum_circuit_{embedding_type.lower()}.png"
+        save_path = os.path.join(save_dir, filename)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"   ✓ Circuit diagram saved: {save_path}")
+        
+    except Exception as e:
+        print(f"   ⚠ Warning: Could not generate circuit diagram: {e}")
+
+
+def plot_qnn_embedding_circuit(qnn_embedding, config, save_dir="result"):
+    """Plot and save QNN embedding circuit visualization
+    
+    Args:
+        qnn_embedding: QNNEmbedding module
+        config: Config object
+        save_dir: str, directory to save the plot
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    
+    print(f"\n📊 Generating QNN embedding circuit diagram...")
+    
+    try:
+        # Create dummy inputs
+        x_dummy = np.random.rand(2)  # (t, x) for 1D
+        
+        # Get the embedding circuit from the QNNEmbedding module
+        fig, ax = qml.draw_mpl(qnn_embedding.qnode_embed)(x_dummy, qnn_embedding.weights_embed)
+        
+        # Add title
+        ax.set_title(f'QNN Embedding Circuit Architecture\n'
+                    f'({config.N_LAYERS_EMBED} layers, {config.N_WIRES} qubits)', 
+                    fontsize=12, fontweight='bold', pad=15)
+        
+        plt.tight_layout()
+        
+        # Save figure
+        filename = "plot3_quantum_circuit_qnn_embedding.png"
+        save_path = os.path.join(save_dir, filename)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"   ✓ QNN embedding circuit diagram saved: {save_path}")
+        
+    except Exception as e:
+        print(f"   ⚠ Warning: Could not generate QNN embedding circuit diagram: {e}")
+
+
+def plot_embedding_results(trainer, save_dir="result"):
+    """Plot 4: Embedding Results Visualization (1D adapted)"""
+    print("\n=== Plot 4: Embedding Results ===")
+    
+    os.makedirs(save_dir, exist_ok=True)
+    
+    # Create grid for visualization
+    t_plot = np.linspace(trainer.T_unique[0], trainer.T_unique[-1], 100)
+    x_plot = np.linspace(trainer.X_unique[0], trainer.X_unique[-1], 100)
+    
+    T_grid, X_grid = np.meshgrid(t_plot, x_plot, indexing='ij')
+    
+    # Create grid points (t, x)
+    grid_points = np.column_stack([T_grid.flatten(), X_grid.flatten()])
+    
+    # Convert to torch and rescale
+    grid_torch = torch.tensor(grid_points, dtype=torch.float32, device=trainer.device)
+    
+    # Rescale to [-0.95, 0.95] domain for models
+    domain_bounds = torch.tensor(
+        [[trainer.config.T_MIN, trainer.config.X_MIN],
+         [trainer.config.T_MAX, trainer.config.X_MAX]],
+        device=trainer.device
+    )
+    grid_rescaled = 1.9 * (grid_torch - domain_bounds[0]) / (domain_bounds[1] - domain_bounds[0]) - 0.95
+    
+    # Process embeddings
+    fnn_basis_outputs = None
+    qnn_basis_outputs = None
+    
+    if hasattr(trainer, 'basis_net') and trainer.basis_net is not None:
+        with torch.no_grad():
+            fnn_basis_outputs = trainer.basis_net(grid_rescaled).detach().cpu().numpy()
+    
+    if hasattr(trainer, 'qnn_embedding') and trainer.qnn_embedding is not None:
+        with torch.no_grad():
+            qnn_basis_outputs = trainer.qnn_embedding(grid_rescaled).detach().cpu().numpy()
+    
+    if fnn_basis_outputs is None and qnn_basis_outputs is None:
+        print("⚠ Embedding networks not available for visualization")
+        return
+    
+    n_wires = fnn_basis_outputs.shape[1] if fnn_basis_outputs is not None else qnn_basis_outputs.shape[1]
+    
+    # Plot embeddings (2 rows × n_wires columns)
+    fig, axes = plt.subplots(2, n_wires, figsize=(5 * n_wires, 10))
+    
+    if n_wires == 1:
+        axes = axes.reshape(2, 1)
+    
+    t_vals = grid_rescaled[:, 0].detach().cpu().numpy()
+    x_vals = grid_rescaled[:, 1].detach().cpu().numpy()
+    
+    # Row 1: FNN-TE-QPINN embeddings
+    if fnn_basis_outputs is not None:
+        for i in range(n_wires):
+            if i % 2 == 0:
+                z = fnn_basis_outputs[:, i] * t_vals
+                label = r"$\phi_{{{}}}^{{FNN}} \cdot \tilde{{t}}$".format(i + 1)
+            else:
+                z = fnn_basis_outputs[:, i] * x_vals
+                label = r"$\phi_{{{}}}^{{FNN}} \cdot \tilde{{x}}$".format(i + 1)
+            
+            Z_grid = z.reshape(len(t_plot), len(x_plot))
+            im = axes[0, i].contourf(t_plot, x_plot, Z_grid.T, 50, cmap='viridis')
+            axes[0, i].set_title(label, fontsize=10)
+            axes[0, i].set_xlabel('t', fontsize=9)
+            if i == 0:
+                axes[0, i].set_ylabel('FNN-TE-QPINN\nx', fontsize=10)
+            plt.colorbar(im, ax=axes[0, i])
+    
+    # Row 2: QNN-TE-QPINN embeddings
+    if qnn_basis_outputs is not None:
+        for i in range(n_wires):
+            if i % 2 == 0:
+                z = qnn_basis_outputs[:, i] * t_vals
+                label = r"$\phi_{{{}}}^{{QNN}} \cdot \tilde{{t}}$".format(i + 1)
+            else:
+                z = qnn_basis_outputs[:, i] * x_vals
+                label = r"$\phi_{{{}}}^{{QNN}} \cdot \tilde{{x}}$".format(i + 1)
+            
+            Z_grid = z.reshape(len(t_plot), len(x_plot))
+            im = axes[1, i].contourf(t_plot, x_plot, Z_grid.T, 50, cmap='viridis')
+            axes[1, i].set_title(label, fontsize=10)
+            axes[1, i].set_xlabel('t', fontsize=9)
+            if i == 0:
+                axes[1, i].set_ylabel('QNN-TE-QPINN\nx', fontsize=10)
+            plt.colorbar(im, ax=axes[1, i])
+    
+    plt.suptitle(r"Plot 4: Trainable Embedding Functions: $\phi(x) \cdot x$ (Brusselator 1D)", 
+                 fontsize=14, fontweight='bold')
+    plt.tight_layout()
+    plt.savefig(f'{save_dir}/plot4_embedding_results.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"✓ Plot 4 saved: {save_dir}/plot4_embedding_results.png")
 
 
 # ============================================================
@@ -494,6 +834,14 @@ class Brusselator1DQPINNTrainer:
             ).to(self.device)
             self.circuit = self._create_circuit()
             params = [self.theta] + list(self.basis_net.parameters())
+            
+            # Count parameters
+            model_components = {'theta': self.theta, 'basis_net': self.basis_net}
+            total_params, param_dict = count_parameters(model_components)
+            print(f"\n📊 Model Parameters ({method_name}):")
+            print(f"   theta: {param_dict.get('theta', 0):,}")
+            print(f"   basis_net: {param_dict.get('basis_net', 0):,}")
+            print(f"   Total: {total_params:,}")
 
         elif embedding_type == "QNN":
             self.theta = torch.rand(self.config.N_LAYERS, self.config.N_WIRES, 3,
@@ -506,6 +854,14 @@ class Brusselator1DQPINNTrainer:
             ).to(self.device)
             self.circuit = self._create_circuit()
             params = [self.theta] + list(self.qnn_embedding.parameters())
+            
+            # Count parameters
+            model_components = {'theta': self.theta, 'qnn_embedding': self.qnn_embedding}
+            total_params, param_dict = count_parameters(model_components)
+            print(f"\n📊 Model Parameters ({method_name}):")
+            print(f"   theta: {param_dict.get('theta', 0):,}")
+            print(f"   qnn_embedding: {param_dict.get('qnn_embedding', 0):,}")
+            print(f"   Total: {total_params:,}")
 
         else:  # NONE (PINN)
             self.pinn = FNNBasisNet(
@@ -515,6 +871,13 @@ class Brusselator1DQPINNTrainer:
                 input_dim=2
             ).to(self.device)
             params = list(self.pinn.parameters())
+            
+            # Count parameters
+            model_components = {'pinn': self.pinn}
+            total_params, param_dict = count_parameters(model_components)
+            print(f"\n📊 Model Parameters ({method_name}):")
+            print(f"   pinn: {param_dict.get('pinn', 0):,}")
+            print(f"   Total: {total_params:,}")
 
         # Optimizer
         optimizer = torch.optim.LBFGS(params, line_search_fn="strong_wolfe")
@@ -686,8 +1049,8 @@ class TrainingVisualizer:
         self.reference_v = trainer.reference_v.cpu().numpy()
     
     def plot_training_analysis(self, save_dir="result"):
-        """Plot 1: Training analysis for each model (2x3 subplots)"""
-        print("\n=== Plot 1: Training Analysis for Each Model ===")
+        """Plot 5: Training analysis for each model (2x3 subplots)"""
+        print("\n=== Plot 5: Training Analysis for Each Model ===")
         
         os.makedirs(save_dir, exist_ok=True)
         
@@ -750,16 +1113,16 @@ class TrainingVisualizer:
             axes[1,2].set_title(f'|v_pred - v_ref| - {method_name}', fontsize=13)
             fig.colorbar(im4, ax=axes[1,2], label='|Error|')
             
-            plt.suptitle(f'Plot 1: {method_name} Training Analysis (Brusselator 1D)', fontsize=16, fontweight='bold')
+            plt.suptitle(f'Plot 5: {method_name} Training Analysis (Brusselator 1D)', fontsize=16, fontweight='bold')
             plt.tight_layout()
-            plt.savefig(f'{save_dir}/plot1_training_{embedding_type.lower()}.png', dpi=300, bbox_inches='tight')
+            plt.savefig(f'{save_dir}/plot5_training_{embedding_type.lower()}.png', dpi=300, bbox_inches='tight')
             plt.close()
             
-            print(f"✓ Plot 1 for {method_name} saved: {save_dir}/plot1_training_{embedding_type.lower()}.png")
+            print(f"✓ Plot 5 for {method_name} saved: {save_dir}/plot5_training_{embedding_type.lower()}.png")
     
     def plot_methods_comparison(self, save_dir="result"):
-        """Plot 3: Methods comparison (1x3 subplots)"""
-        print("\n=== Plot 3: Methods Comparison ===")
+        """Plot 6: Methods comparison (1x3 subplots)"""
+        print("\n=== Plot 6: Methods Comparison ===")
         
         os.makedirs(save_dir, exist_ok=True)
         
@@ -795,13 +1158,13 @@ class TrainingVisualizer:
         axes[2].legend(fontsize=12, loc='best')
         axes[2].grid(True, alpha=0.3, which='both')
         
-        plt.suptitle('Plot 3: Three Methods Comparison (PINN vs FNN-TE-QPINN vs QNN-TE-QPINN)',
+        plt.suptitle('Plot 6: Three Methods Comparison (PINN vs FNN-TE-QPINN vs QNN-TE-QPINN)',
                      fontsize=18, fontweight='bold', y=1.02)
         plt.tight_layout()
-        plt.savefig(f'{save_dir}/plot3_methods_comparison.png', dpi=300, bbox_inches='tight')
+        plt.savefig(f'{save_dir}/plot6_methods_comparison.png', dpi=300, bbox_inches='tight')
         plt.close()
         
-        print(f"✓ Plot 3 saved: {save_dir}/plot3_methods_comparison.png")
+        print(f"✓ Plot 6 saved: {save_dir}/plot6_methods_comparison.png")
     
     def print_summary(self):
         """Print summary statistics"""
@@ -844,12 +1207,86 @@ def main():
     # Initialize trainer
     trainer = Brusselator1DQPINNTrainer(config, device)
     
+    # === Plot 1: Collocation Points ===
+    plot_collocation_points_1d(config, config.OUTPUT_DIR)
+    
+    # === Plot 2: Reference Solution ===
+    ref_path = os.path.join(config.BASE_DIR, "brusselator_reference_solution.npy")
+    if os.path.exists(ref_path):
+        loaded = np.load(ref_path, allow_pickle=True)[()]
+        plot_reference_solution(loaded['t'], loaded['x'], loaded['u_sol'], loaded['v_sol'], config.OUTPUT_DIR)
+    
     # Train all models
     for embedding_type in ["NONE", "FNN_BASIS", "QNN"]:
         trainer.train_model(embedding_type, config.TRAINING_ITERATIONS)
         trainer.save_model(embedding_type, config.OUTPUT_DIR)
     
-    # Generate visualizations
+    # === Plot 3 & 4: Quantum Circuits (FNN and QNN) ===
+    # Create dummy circuits for visualization
+    from scipy.integrate import solve_ivp
+    
+    # FNN Circuit
+    dev_fnn = qml.device("default.qubit", wires=config.N_WIRES)
+    
+    @qml.qnode(dev_fnn, interface="torch")
+    def circuit_fnn(x, theta, basis):
+        for i in range(config.N_WIRES):
+            if i % 2 == 0:
+                qml.RY(basis[i] * x[0], wires=i)
+            else:
+                qml.RY(basis[i] * x[1], wires=i)
+        for layer in range(config.N_LAYERS):
+            for qubit in range(config.N_WIRES):
+                qml.RX(theta[layer, qubit, 0], wires=qubit)
+                qml.RY(theta[layer, qubit, 1], wires=qubit)
+                qml.RZ(theta[layer, qubit, 2], wires=qubit)
+            for qubit in range(config.N_WIRES - 1):
+                qml.CNOT(wires=[qubit, qubit + 1])
+        return [qml.expval(qml.PauliZ(0)), qml.expval(qml.PauliZ(1))]
+    
+    try:
+        plot_quantum_circuit(circuit_fnn, "FNN_BASIS", config, config.OUTPUT_DIR)
+    except Exception as e:
+        print(f"⚠ Could not generate FNN circuit plot: {e}")
+    
+    # QNN Circuit
+    dev_qnn = qml.device("default.qubit", wires=config.N_WIRES)
+    
+    @qml.qnode(dev_qnn, interface="torch")
+    def circuit_qnn(x, theta, basis):
+        for i in range(config.N_WIRES):
+            if i % 2 == 0:
+                qml.RX(x[0], wires=i)
+            else:
+                qml.RY(x[1], wires=i)
+        for layer in range(config.N_LAYERS):
+            for qubit in range(config.N_WIRES):
+                qml.RX(theta[layer, qubit, 0], wires=qubit)
+                qml.RY(theta[layer, qubit, 1], wires=qubit)
+                qml.RZ(theta[layer, qubit, 2], wires=qubit)
+            for qubit in range(config.N_WIRES - 1):
+                qml.CNOT(wires=[qubit, qubit + 1])
+        return [qml.expval(qml.PauliZ(0)), qml.expval(qml.PauliZ(1))]
+    
+    try:
+        plot_quantum_circuit(circuit_qnn, "QNN", config, config.OUTPUT_DIR)
+    except Exception as e:
+        print(f"⚠ Could not generate QNN circuit plot: {e}")
+    
+    # Plot QNN embedding circuit
+    if hasattr(trainer, 'qnn_embedding') and trainer.qnn_embedding is not None:
+        try:
+            plot_qnn_embedding_circuit(trainer.qnn_embedding, config, config.OUTPUT_DIR)
+        except Exception as e:
+            print(f"⚠ Could not generate QNN embedding circuit plot: {e}")
+    
+    # === Plot 4: Embedding Results ===
+    try:
+        plot_embedding_results(trainer, config.OUTPUT_DIR)
+    except Exception as e:
+        print(f"⚠ Could not generate embedding plot: {e}")
+    
+    # === Generate visualizations (Plot 5 and 6) ===
     visualizer = TrainingVisualizer(trainer)
     visualizer.plot_training_analysis(config.OUTPUT_DIR)
     visualizer.plot_methods_comparison(config.OUTPUT_DIR)
@@ -878,8 +1315,13 @@ def main():
     print("TRAINING COMPLETE!")
     print("="*80)
     print(f"Results saved to: {config.OUTPUT_DIR}/")
-    print("  - plot1_training_*.png (for each model)")
-    print("  - plot3_methods_comparison.png")
+    print("Generated Plots:")
+    print("  - plot1_collocation_points.png")
+    print("  - plot2_reference_solution.png")
+    print("  - plot3_quantum_circuit_*.png (FNN and QNN circuits)")
+    print("  - plot4_embedding_results.png")
+    print("  - plot5_training_*.png (for each model)")
+    print("  - plot6_methods_comparison.png")
     print("  - pinn/, fnn_basis/, qnn/ (model checkpoints)")
     print("  - training_summary.json")
     print("="*80)

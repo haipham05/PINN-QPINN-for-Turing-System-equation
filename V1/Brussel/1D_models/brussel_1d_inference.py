@@ -3,8 +3,9 @@ Brusselator 1D QPINN - Inference Script
 Load trained models and perform inference with visualization
 
 This script loads the trained models and generates:
-1. Plot 2: Performance analysis at t=0.5 (solution, L2 error, L∞ error)
-2. Plot 4: Time evolution comparison (t ∈ [0, 1])
+1. Plot 3: Quantum circuit visualization (FNN and QNN)
+2. Plot 7: Performance analysis for each model (predictions, L2 error, L∞ error)
+3. Plot 8: Time evolution comparison (t ∈ [0, 1])
 
 Author: QPINN Research
 Date: 2024-2025
@@ -21,6 +22,90 @@ import pennylane as qml
 import numpy as np
 from scipy.interpolate import RegularGridInterpolator
 import matplotlib.pyplot as plt
+
+
+# ============================================================
+# QUANTUM CIRCUIT PLOTTING FUNCTIONS
+# ============================================================
+
+def plot_quantum_circuit(circuit_func, embedding_type, config, save_dir="result"):
+    """Plot and save quantum circuit visualization
+    
+    Args:
+        circuit_func: QNode circuit function
+        embedding_type: str, "FNN_BASIS" or "QNN"
+        config: Config object
+        save_dir: str, directory to save the plot
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    
+    method_name = {"FNN_BASIS": "FNN-TE-QPINN", "QNN": "QNN-TE-QPINN"}[embedding_type]
+    
+    # Create dummy inputs for visualization
+    x_dummy = np.random.rand(2)  # (t, x) for 1D
+    theta_dummy = np.random.rand(config.N_LAYERS, config.N_WIRES, 3)  # Variational parameters
+    basis_dummy = np.random.rand(config.N_WIRES)
+    
+    print(f"\n📊 Generating quantum circuit diagram for {method_name}...")
+    
+    try:
+        fig, ax = qml.draw_mpl(circuit_func)(x_dummy, theta_dummy, basis_dummy)
+        
+        # Add title
+        ax.set_title(f'{method_name} Quantum Circuit Architecture\n'
+                    f'({config.N_LAYERS} layers, {config.N_WIRES} qubits)', 
+                    fontsize=14, fontweight='bold', pad=20)
+        
+        plt.tight_layout()
+        
+        # Save figure
+        filename = f"plot3_quantum_circuit_{embedding_type.lower()}_inference.png"
+        save_path = os.path.join(save_dir, filename)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"   ✓ Circuit diagram saved: {save_path}")
+        
+    except Exception as e:
+        print(f"   ⚠ Warning: Could not generate circuit diagram: {e}")
+
+
+def plot_qnn_embedding_circuit(qnn_embedding, config, save_dir="result"):
+    """Plot and save QNN embedding circuit visualization
+    
+    Args:
+        qnn_embedding: QNNEmbedding module
+        config: Config object
+        save_dir: str, directory to save the plot
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    
+    print(f"\n📊 Generating QNN embedding circuit diagram...")
+    
+    try:
+        # Create dummy inputs
+        x_dummy = np.random.rand(2)  # (t, x) for 1D
+        
+        # Get the embedding circuit from the QNNEmbedding module
+        fig, ax = qml.draw_mpl(qnn_embedding.qnode_embed)(x_dummy, qnn_embedding.weights_embed)
+        
+        # Add title
+        ax.set_title(f'QNN Embedding Circuit Architecture\n'
+                    f'({config.N_LAYERS_EMBED} layers, {config.N_WIRES} qubits)', 
+                    fontsize=14, fontweight='bold', pad=20)
+        
+        plt.tight_layout()
+        
+        # Save figure
+        filename = "plot3_quantum_circuit_qnn_embedding_inference.png"
+        save_path = os.path.join(save_dir, filename)
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"   ✓ QNN embedding circuit diagram saved: {save_path}")
+        
+    except Exception as e:
+        print(f"   ⚠ Warning: Could not generate QNN embedding circuit diagram: {e}")
 
 
 # ============================================================
@@ -325,13 +410,14 @@ class InferenceVisualizer:
         self.X_unique = inference_engine.X_unique
     
     def plot_performance_analysis(self, save_dir="result"):
-        """Plot 2: Performance analysis for each model (3x3 subplots)
+        """Plot 7: Performance analysis for each model (1x3 subplots per model)
         
-        Row 1: u prediction, u reference, u absolute error (heatmaps)
-        Row 2: v prediction, v reference, v absolute error (heatmaps)
-        Row 3: Combined MSE error, Combined absolute error, Statistics text
+        For each model (PINN, FNN-TE-QPINN, QNN-TE-QPINN):
+        - Column 1: Model predictions (heatmap u and v)
+        - Column 2: L2 Relative Error (MSE) vs RK45
+        - Column 3: L∞ Relative Error (Lmax) vs RK45
         """
-        print("\n=== Plot 2: Performance Analysis for Each Model ===")
+        print("\n=== Plot 7: Performance Analysis for Each Model ===")
         
         os.makedirs(save_dir, exist_ok=True)
         
@@ -348,111 +434,93 @@ class InferenceVisualizer:
             
             results = self.embedding_results[embedding_type]
             
-            fig, axes = plt.subplots(3, 3, figsize=(24, 21))
+            # Create figure with 2 rows (u, v) × 3 columns (prediction, L2 error, Linf error)
+            fig, axes = plt.subplots(2, 3, figsize=(18, 12))
             
             # Reshape predictions
             u_pred = results['predictions_u'].reshape(n_t, n_x)
             v_pred = results['predictions_v'].reshape(n_t, n_x)
             u_ref = results['reference_u'].reshape(n_t, n_x)
             v_ref = results['reference_v'].reshape(n_t, n_x)
-            u_error = np.abs(u_pred - u_ref)
-            v_error = np.abs(v_pred - v_ref)
             
-            # Row 1: u Analysis
-            # u Prediction (inferno)
-            im1 = axes[0,0].contourf(self.T_unique, self.X_unique, u_pred.T, 100, cmap='inferno')
-            axes[0,0].set_xlabel('Time t', fontsize=12)
-            axes[0,0].set_ylabel('Space x', fontsize=12)
-            axes[0,0].set_title(f'u(t,x) Prediction - {method_name}', fontsize=13)
-            fig.colorbar(im1, ax=axes[0,0], label='u')
+            # Compute L2 Relative Error (MSE)
+            eps = 1e-10
+            u_l2_error = (u_pred - u_ref) ** 2 / (u_ref ** 2 + eps)
+            v_l2_error = (v_pred - v_ref) ** 2 / (v_ref ** 2 + eps)
             
-            # u Reference (inferno)
-            im2 = axes[0,1].contourf(self.T_unique, self.X_unique, u_ref.T, 100, cmap='inferno')
-            axes[0,1].set_xlabel('Time t', fontsize=12)
-            axes[0,1].set_ylabel('Space x', fontsize=12)
-            axes[0,1].set_title(f'u(t,x) Reference - {method_name}', fontsize=13)
-            fig.colorbar(im2, ax=axes[0,1], label='u')
+            # Compute L∞ Relative Error (pointwise)
+            u_linf_error = np.abs(u_pred - u_ref) / (np.abs(u_ref) + eps)
+            v_linf_error = np.abs(v_pred - v_ref) / (np.abs(v_ref) + eps)
             
-            # u Absolute Error (inferno)
-            im3 = axes[0,2].contourf(self.T_unique, self.X_unique, u_error.T, 100, cmap='inferno')
-            axes[0,2].set_xlabel('Time t', fontsize=12)
-            axes[0,2].set_ylabel('Space x', fontsize=12)
-            axes[0,2].set_title(f'|u_pred - u_ref| - {method_name}', fontsize=13)
-            fig.colorbar(im3, ax=axes[0,2], label='|Error|')
+            # === Column 1: Predictions (heatmaps) ===
+            # u Prediction
+            im1 = axes[0, 0].contourf(self.T_unique, self.X_unique, u_pred.T, 100, cmap='inferno')
+            axes[0, 0].set_xlabel('Time t', fontsize=11)
+            axes[0, 0].set_ylabel('Space x', fontsize=11)
+            axes[0, 0].set_title(f'u(t,x) - {method_name}', fontsize=12, fontweight='bold')
+            fig.colorbar(im1, ax=axes[0, 0], label='u')
             
-            # Row 2: v Analysis (viridis)
             # v Prediction
-            im4 = axes[1,0].contourf(self.T_unique, self.X_unique, v_pred.T, 100, cmap='viridis')
-            axes[1,0].set_xlabel('Time t', fontsize=12)
-            axes[1,0].set_ylabel('Space x', fontsize=12)
-            axes[1,0].set_title(f'v(t,x) Prediction - {method_name}', fontsize=13)
-            fig.colorbar(im4, ax=axes[1,0], label='v')
+            im2 = axes[1, 0].contourf(self.T_unique, self.X_unique, v_pred.T, 100, cmap='viridis')
+            axes[1, 0].set_xlabel('Time t', fontsize=11)
+            axes[1, 0].set_ylabel('Space x', fontsize=11)
+            axes[1, 0].set_title(f'v(t,x) - {method_name}', fontsize=12, fontweight='bold')
+            fig.colorbar(im2, ax=axes[1, 0], label='v')
             
-            # v Reference (viridis)
-            im5 = axes[1,1].contourf(self.T_unique, self.X_unique, v_ref.T, 100, cmap='viridis')
-            axes[1,1].set_xlabel('Time t', fontsize=12)
-            axes[1,1].set_ylabel('Space x', fontsize=12)
-            axes[1,1].set_title(f'v(t,x) Reference - {method_name}', fontsize=13)
-            fig.colorbar(im5, ax=axes[1,1], label='v')
+            # === Column 2: L2 Relative Error (MSE) ===
+            # u L2 Error
+            im3 = axes[0, 1].contourf(self.T_unique, self.X_unique, u_l2_error.T, 100, cmap='hot')
+            axes[0, 1].set_xlabel('Time t', fontsize=11)
+            axes[0, 1].set_ylabel('Space x', fontsize=11)
+            axes[0, 1].set_title(f'u - L2 Relative Error (MSE)', fontsize=12, fontweight='bold')
+            fig.colorbar(im3, ax=axes[0, 1], label='L2 Error')
             
-            # v Absolute Error (viridis)
-            im6 = axes[1,2].contourf(self.T_unique, self.X_unique, v_error.T, 100, cmap='viridis')
-            axes[1,2].set_xlabel('Time t', fontsize=12)
-            axes[1,2].set_ylabel('Space x', fontsize=12)
-            axes[1,2].set_title(f'|v_pred - v_ref| - {method_name}', fontsize=13)
-            fig.colorbar(im6, ax=axes[1,2], label='|Error|')
+            # v L2 Error
+            im4 = axes[1, 1].contourf(self.T_unique, self.X_unique, v_l2_error.T, 100, cmap='hot')
+            axes[1, 1].set_xlabel('Time t', fontsize=11)
+            axes[1, 1].set_ylabel('Space x', fontsize=11)
+            axes[1, 1].set_title(f'v - L2 Relative Error (MSE)', fontsize=12, fontweight='bold')
+            fig.colorbar(im4, ax=axes[1, 1], label='L2 Error')
             
-            # Row 3: Error Metrics
-            # Combined MSE Error Plot
-            u_error_sq = (u_pred - u_ref)**2
-            v_error_sq = (v_pred - v_ref)**2
-            combined_mse = (u_error_sq + v_error_sq) / 2
+            # === Column 3: L∞ Relative Error (Lmax) ===
+            # u Linf Error
+            im5 = axes[0, 2].contourf(self.T_unique, self.X_unique, u_linf_error.T, 100, cmap='plasma')
+            axes[0, 2].set_xlabel('Time t', fontsize=11)
+            axes[0, 2].set_ylabel('Space x', fontsize=11)
+            axes[0, 2].set_title(f'u - L∞ Relative Error (Lmax)', fontsize=12, fontweight='bold')
+            fig.colorbar(im5, ax=axes[0, 2], label='L∞ Error')
             
-            im7 = axes[2,0].contourf(self.T_unique, self.X_unique, combined_mse.T, 100, cmap='viridis')
-            axes[2,0].set_xlabel('Time t', fontsize=12)
-            axes[2,0].set_ylabel('Space x', fontsize=12)
-            axes[2,0].set_title(f'L2 MSE (Combined u+v) - {method_name}', fontsize=13)
-            fig.colorbar(im7, ax=axes[2,0], label='MSE')
+            # v Linf Error
+            im6 = axes[1, 2].contourf(self.T_unique, self.X_unique, v_linf_error.T, 100, cmap='plasma')
+            axes[1, 2].set_xlabel('Time t', fontsize=11)
+            axes[1, 2].set_ylabel('Space x', fontsize=11)
+            axes[1, 2].set_title(f'v - L∞ Relative Error (Lmax)', fontsize=12, fontweight='bold')
+            fig.colorbar(im6, ax=axes[1, 2], label='L∞ Error')
             
-            # Combined Lmax Error Plot
-            combined_abs_error = (u_error + v_error) / 2
+            # Add global error statistics as text annotation
+            global_mse_u = results['mse_u']
+            global_mse_v = results['mse_v']
+            global_lmax_u = results['lmax_u']
+            global_lmax_v = results['lmax_v']
             
-            im8 = axes[2,1].contourf(self.T_unique, self.X_unique, combined_abs_error.T, 100, cmap='viridis')
-            axes[2,1].set_xlabel('Time t', fontsize=12)
-            axes[2,1].set_ylabel('Space x', fontsize=12)
-            axes[2,1].set_title(f'Lmax (Combined |Error|) - {method_name}', fontsize=13)
-            fig.colorbar(im8, ax=axes[2,1], label='|Error|')
+            stats_text = (f"Global Errors:\n"
+                         f"u: MSE={global_mse_u:.2E}, Lmax={global_lmax_u:.2E}\n"
+                         f"v: MSE={global_mse_v:.2E}, Lmax={global_lmax_v:.2E}")
+            fig.text(0.5, 0.01, stats_text, ha='center', fontsize=11, 
+                    bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.8))
             
-            # Error Summary Statistics
-            axes[2,2].axis('off')
-            stats_text = f"""
-    {method_name} Error Summary:
-    
-    Activator u:
-      MSE:  {results['mse_u']:.6E}
-      L2:   {results['l2_u']:.6E}
-      Lmax: {results['lmax_u']:.6E}
-    
-    Substrate v:
-      MSE:  {results['mse_v']:.6E}
-      L2:   {results['l2_v']:.6E}
-      Lmax: {results['lmax_v']:.6E}
-            """
-            axes[2,2].text(0.1, 0.5, stats_text, fontsize=14, verticalalignment='center',
-                          fontfamily='monospace', transform=axes[2,2].transAxes,
-                          bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.8))
-            axes[2,2].set_title(f'Error Statistics - {method_name}', fontsize=13)
+            plt.suptitle(f'Plot 7: {method_name} Performance vs RK45 Reference (Brusselator 1D)', 
+                         fontsize=15, fontweight='bold')
+            plt.tight_layout(rect=[0, 0.05, 1, 0.96])
             
-            plt.suptitle(f'Plot 2: {method_name} Performance Analysis (Brusselator 1D)', fontsize=16, fontweight='bold')
-            plt.tight_layout()
-            plt.savefig(f'{save_dir}/plot2_performance_{embedding_type.lower()}.png', dpi=300, bbox_inches='tight')
+            plt.savefig(f'{save_dir}/plot7_performance_{folder_name}.png', dpi=300, bbox_inches='tight')
             plt.close()
             
-            print(f"✓ Plot 2 for {method_name} saved: {save_dir}/plot2_performance_{embedding_type.lower()}.png")
+            print(f"✓ Plot 7 for {method_name} saved: {save_dir}/plot7_performance_{folder_name}.png")
     
     def plot_time_evolution(self, save_dir="result", t_max=1.0):
-        """Plot 4: Time evolution heatmaps for all methods"""
-        print(f"\n=== Plot 4: Time Evolution Comparison (t ∈ [0, {t_max}]) ===")
+        """Plot 8: Time evolution heatmaps for all methods"""
+        print(f"\n=== Plot 8: Time Evolution Comparison (t ∈ [0, {t_max}]) ===")
         
         os.makedirs(save_dir, exist_ok=True)
         
@@ -493,13 +561,13 @@ class InferenceVisualizer:
                     ax.set_title(f'{method_name} {component}(t,x)', fontsize=12, fontweight='bold')
                     plt.colorbar(im, ax=ax)
             
-            plt.suptitle(f'{component}(t,x) Time Evolution Comparison (Brusselator 1D, t∈[0,{t_max}])',
+            plt.suptitle(f'Plot 8: {component}(t,x) Time Evolution Comparison (Brusselator 1D, t∈[0,{t_max}])',
                         fontsize=14, fontweight='bold')
             plt.tight_layout()
-            plt.savefig(f'{save_dir}/plot4_time_evolution_{component}.png', dpi=300, bbox_inches='tight')
+            plt.savefig(f'{save_dir}/plot8_time_evolution_{component}.png', dpi=300, bbox_inches='tight')
             plt.close()
             
-            print(f"✓ Time evolution plot for {component} saved")
+            print(f"✓ Plot 8 - Time evolution plot for {component} saved")
     
     def print_summary(self):
         """Print summary statistics"""
@@ -565,11 +633,67 @@ def main():
         if os.path.exists(model_path):
             results = inference_engine.inference(model_path, embedding_type)
             embedding_results[embedding_type] = results
+            
+            # Plot quantum circuits for FNN and QNN
+            if embedding_type in ["FNN_BASIS", "QNN"]:
+                # Plot main circuit
+                if embedding_type == "FNN_BASIS":
+                    dev = qml.device("default.qubit", wires=config.N_WIRES)
+                    @qml.qnode(dev, interface="torch")
+                    def circuit(x, theta, basis):
+                        for i in range(config.N_WIRES):
+                            if i % 2 == 0:
+                                qml.RY(basis[i] * x[0], wires=i)
+                            else:
+                                qml.RY(basis[i] * x[1], wires=i)
+                        for layer in range(config.N_LAYERS):
+                            for qubit in range(config.N_WIRES):
+                                qml.RX(theta[layer, qubit, 0], wires=qubit)
+                                qml.RY(theta[layer, qubit, 1], wires=qubit)
+                                qml.RZ(theta[layer, qubit, 2], wires=qubit)
+                            for qubit in range(config.N_WIRES - 1):
+                                qml.CNOT(wires=[qubit, qubit + 1])
+                        return [qml.expval(qml.PauliZ(0)), qml.expval(qml.PauliZ(1))]
+                    try:
+                        plot_quantum_circuit(circuit, "FNN_BASIS", config, config.OUTPUT_DIR)
+                    except Exception as e:
+                        print(f"⚠ Could not generate FNN circuit plot: {e}")
+                
+                elif embedding_type == "QNN":
+                    dev = qml.device("default.qubit", wires=config.N_WIRES)
+                    @qml.qnode(dev, interface="torch")
+                    def circuit(x, theta, basis):
+                        for i in range(config.N_WIRES):
+                            if i % 2 == 0:
+                                qml.RX(x[0], wires=i)
+                            else:
+                                qml.RY(x[1], wires=i)
+                        for layer in range(config.N_LAYERS):
+                            for qubit in range(config.N_WIRES):
+                                qml.RX(theta[layer, qubit, 0], wires=qubit)
+                                qml.RY(theta[layer, qubit, 1], wires=qubit)
+                                qml.RZ(theta[layer, qubit, 2], wires=qubit)
+                            for qubit in range(config.N_WIRES - 1):
+                                qml.CNOT(wires=[qubit, qubit + 1])
+                        return [qml.expval(qml.PauliZ(0)), qml.expval(qml.PauliZ(1))]
+                    try:
+                        plot_quantum_circuit(circuit, "QNN", config, config.OUTPUT_DIR)
+                    except Exception as e:
+                        print(f"⚠ Could not generate QNN circuit plot: {e}")
+                    
+                    # Plot QNN embedding circuit
+                    if hasattr(inference_engine, 'qnn_embedding'):
+                        try:
+                            plot_qnn_embedding_circuit(inference_engine.qnn_embedding, config, config.OUTPUT_DIR)
+                        except Exception as e:
+                            print(f"⚠ Could not generate QNN embedding circuit plot: {e}")
         else:
             print(f"⚠ Model not found: {model_path}")
     
     # Visualizations
     visualizer = InferenceVisualizer(inference_engine, embedding_results)
+    
+    # === Plot 7 & 8: Performance and Time Evolution ===
     visualizer.plot_performance_analysis(config.OUTPUT_DIR)
     visualizer.plot_time_evolution(config.OUTPUT_DIR, t_max=1.0)
     visualizer.print_summary()
@@ -582,6 +706,11 @@ def main():
     
     print("\n" + "="*80)
     print("INFERENCE COMPLETE!")
+    print("="*80)
+    print("Generated Plots:")
+    print("  - plot3_quantum_circuit_*.png (FNN and QNN circuits)")
+    print("  - plot7_performance_*.png (for each model)")
+    print("  - plot8_time_evolution_*.png (for u and v)")
     print("="*80)
 
 
