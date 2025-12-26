@@ -1,1 +1,22 @@
-result
+# Results and plots
+result/
+**/result/
+
+# Model parameters and weights
+*.pth
+*.pt
+*.npy
+Trained_models/
+**/pinn/
+**/fnn_basis/
+**/qnn/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDEs
+.vscode/
+.idea/
+.ipynb_checkpoints/
