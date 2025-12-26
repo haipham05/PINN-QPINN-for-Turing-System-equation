@@ -1109,12 +1109,15 @@ class TrainingVisualizer:
         # Row 1: FNN-TE-QPINN embeddings
         if fnn_basis_outputs is not None:
             for i in range(n_wires):
-                if i % 2 == 0:
-                    z = fnn_basis_outputs[:, i] * t_vals
-                    label = r"$\phi_{{{}}}^{{FNN}} \cdot \tilde{{t}}$".format(i + 1)
+                if i % 3 == 0:
+                    z = fnn_basis_outputs[:, i]
+                    label = r"$\phi_{{{}}}^{{FNN}}(\tilde{{t}})$".format(i + 1)
+                elif i % 3 == 1:
+                    z = fnn_basis_outputs[:, i]
+                    label = r"$\phi_{{{}}}^{{FNN}}(\tilde{{x}})$".format(i + 1)
                 else:
-                    z = fnn_basis_outputs[:, i] * x_vals
-                    label = r"$\phi_{{{}}}^{{FNN}} \cdot \tilde{{x}}$".format(i + 1)
+                    z = fnn_basis_outputs[:, i]
+                    label = r"$\phi_{{{}}}^{{FNN}}(\tilde{{y}})$".format(i + 1)
                 
                 Z_grid = z.reshape(len(t_plot), len(x_plot))
                 im = axes[0, i].contourf(t_plot, x_plot, Z_grid.T, 50, cmap='viridis')
@@ -1127,12 +1130,15 @@ class TrainingVisualizer:
         # Row 2: QNN-TE-QPINN embeddings
         if qnn_basis_outputs is not None:
             for i in range(n_wires):
-                if i % 2 == 0:
-                    z = qnn_basis_outputs[:, i] * t_vals
-                    label = r"$\phi_{{{}}}^{{QNN}} \cdot \tilde{{t}}$".format(i + 1)
+                if i % 3 == 0:
+                    z = qnn_basis_outputs[:, i]
+                    label = r"$\phi_{{{}}}^{{QNN}}(\tilde{{t}})$".format(i + 1)
+                elif i % 3 == 1:
+                    z = qnn_basis_outputs[:, i]
+                    label = r"$\phi_{{{}}}^{{QNN}}(\tilde{{x}})$".format(i + 1)
                 else:
-                    z = qnn_basis_outputs[:, i] * x_vals
-                    label = r"$\phi_{{{}}}^{{QNN}} \cdot \tilde{{x}}$".format(i + 1)
+                    z = qnn_basis_outputs[:, i]
+                    label = r"$\phi_{{{}}}^{{QNN}}(\tilde{{y}})$".format(i + 1)
                 
                 Z_grid = z.reshape(len(t_plot), len(x_plot))
                 im = axes[1, i].contourf(t_plot, x_plot, Z_grid.T, 50, cmap='viridis')
@@ -1142,7 +1148,7 @@ class TrainingVisualizer:
                     axes[1, i].set_ylabel('QNN-TE-QPINN\nx', fontsize=11)
                 plt.colorbar(im, ax=axes[1, i])
         
-        plt.suptitle(r"Plot 4: Trainable Embedding Functions: $\phi(x) \cdot x$ (Brusselator 2D)", 
+        plt.suptitle(r"Plot 4: Trainable Embedding Functions $\phi(x)$ (Brusselator 2D)", 
                      fontsize=16, fontweight='bold')
         plt.tight_layout()
         plt.savefig(f'{save_dir}/plot4_embedding_results.png', dpi=300, bbox_inches='tight')

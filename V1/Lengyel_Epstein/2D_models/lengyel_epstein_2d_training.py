@@ -486,15 +486,15 @@ class LengyelEpstein2DQPINNTrainer:
             pred = self.model(self.interior_colloc)
             u, v = pred[:, 0], pred[:, 1]
             
-            grad_u = torch.autograd.grad(u.sum(), self.interior_colloc, create_graph=True)[0]
+            grad_u = torch.autograd.grad(u.sum(), self.interior_colloc, create_graph=True, retain_graph=True)[0]
             du_dt, du_dx, du_dy = grad_u[:, 0], grad_u[:, 1], grad_u[:, 2]
-            d2u_dx2 = torch.autograd.grad(du_dx.sum(), self.interior_colloc, create_graph=True)[0][:, 1]
-            d2u_dy2 = torch.autograd.grad(du_dy.sum(), self.interior_colloc, create_graph=True)[0][:, 2]
+            d2u_dx2 = torch.autograd.grad(du_dx.sum(), self.interior_colloc, create_graph=True, retain_graph=True)[0][:, 1]
+            d2u_dy2 = torch.autograd.grad(du_dy.sum(), self.interior_colloc, create_graph=True, retain_graph=True)[0][:, 2]
             
-            grad_v = torch.autograd.grad(v.sum(), self.interior_colloc, create_graph=True)[0]
+            grad_v = torch.autograd.grad(v.sum(), self.interior_colloc, create_graph=True, retain_graph=True)[0]
             dv_dt, dv_dx, dv_dy = grad_v[:, 0], grad_v[:, 1], grad_v[:, 2]
-            d2v_dx2 = torch.autograd.grad(dv_dx.sum(), self.interior_colloc, create_graph=True)[0][:, 1]
-            d2v_dy2 = torch.autograd.grad(dv_dy.sum(), self.interior_colloc, create_graph=True)[0][:, 2]
+            d2v_dx2 = torch.autograd.grad(dv_dx.sum(), self.interior_colloc, create_graph=True, retain_graph=True)[0][:, 1]
+            d2v_dy2 = torch.autograd.grad(dv_dy.sum(), self.interior_colloc, create_graph=True, retain_graph=True)[0][:, 2]
             
             denom = 1.0 + u**2
             res_u = du_dt - self.config.D_U * (d2u_dx2 + d2u_dy2) - (self.config.A - u - (4.0 * u * v) / denom)
