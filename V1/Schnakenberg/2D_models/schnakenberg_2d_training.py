@@ -217,7 +217,7 @@ def plot_collocation_points_2d(config, save_dir="result"):
     """
     Plot 5: Collocation Points Distribution (IC, BC, Interior)
     Biểu đồ thể hiện collocation points được tách thành IC, BC, và Interior points
-    Adapted for Brusselator domain [0,1] × [0,1]
+    Adapted for Schnakenberg domain [0,1] × [0,1]
     
     IC points: All spatial (x,y) points at t=T_MIN (full grid)
     BC points: Random points at spatial boundaries for t > T_MIN
@@ -318,7 +318,7 @@ def plot_reference_solution(t, x, y, u_sol, v_sol, save_dir="result"):
     Plot 6: Reference Solution from RK45
     Biểu đồ biểu diễn hai reference solution của u và v giải bằng RK45
     Creates 2D heatmaps of u and v at 5 time snapshots
-    Adapted for Brusselator (u, v) variables
+    Adapted for Schnakenberg (u, v) variables
     
     Args:
         t: Time array from RK45 solver
@@ -449,8 +449,8 @@ def generate_reference_solution(config, save_path="schnakenberg_3d_reference_sol
         
         return np.concatenate([du.ravel(), dv.ravel()])
     
-    print(f"Solving 2D Brusselator PDE with RK45...")
-    print(f"Parameters: μ={config.MU}, ε={config.EPSILON}, β={config.BETA}")
+    print(f"Solving 2D Schnakenberg PDE with RK45...")
+    print(f"Parameters: D_U={config.D_U}, D_V={config.D_V}, A={config.A}, B={config.B}")
     print(f"Grid: Nx={Nx}, Ny={Ny}, Nt={Nt}")
     
     sol = solve_ivp(rd_rhs_3d, [t_eval[0], t_eval[-1]], y0, t_eval=t_eval,
@@ -1043,7 +1043,7 @@ class TrainingVisualizer:
         self.reference_v = trainer.reference_v.cpu().numpy()
     
     def plot_embedding_results(self, save_dir="result"):
-        """Plot 8: Embedding Results Visualization (adapted for Brusselator)
+        """Plot 8: Embedding Results Visualization (adapted for Schnakenberg)
         Shows embedding outputs for FNN-TE-QPINN and QNN-TE-QPINN
         """
         print("\n=== Plot 8: Embedding Results ===")
@@ -1142,7 +1142,7 @@ class TrainingVisualizer:
                     axes[1, i].set_ylabel('QNN-TE-QPINN\nx', fontsize=11)
                 plt.colorbar(im, ax=axes[1, i])
         
-        plt.suptitle(r"Plot 4: Trainable Embedding Functions: $\phi(x) \cdot x$ (Brusselator 2D)", 
+        plt.suptitle(r"Plot 4: Trainable Embedding Functions: $\phi(x) \cdot x$ (Schnakenberg 2D)", 
                      fontsize=16, fontweight='bold')
         plt.tight_layout()
         plt.savefig(f'{save_dir}/plot4_embedding_results.png', dpi=300, bbox_inches='tight')
@@ -1152,7 +1152,7 @@ class TrainingVisualizer:
     
     def plot_training_analysis(self, save_dir="result"):
         """Plot 1: Training analysis for each model - 2D adapted
-        Renamed to Training Analysis for Brusselator
+        Renamed to Training Analysis for Schnakenberg
         """
         print("\n=== Plot 1: Training Analysis for Each Model ===")
         
@@ -1226,7 +1226,7 @@ class TrainingVisualizer:
             axes[1,2].set_aspect('equal')
             fig.colorbar(im4, ax=axes[1,2], label='|Error|')
             
-            plt.suptitle(f'Plot 5: {method_name} Training Analysis (Brusselator 3D)', fontsize=16, fontweight='bold')
+            plt.suptitle(f'Plot 5: {method_name} Training Analysis (Schnakenberg 3D)', fontsize=16, fontweight='bold')
             plt.tight_layout()
             plt.savefig(f'{save_dir}/plot5_training_{embedding_type.lower()}.png', dpi=300, bbox_inches='tight')
             plt.close()
@@ -1282,7 +1282,7 @@ class TrainingVisualizer:
     def print_summary(self):
         """Print summary statistics"""
         print("\n" + "="*70)
-        print("TRAINING SUMMARY STATISTICS (Brusselator 3D)")
+        print("TRAINING SUMMARY STATISTICS (Schnakenberg 3D)")
         print("="*70)
         print(f"\n{'Method':<20} {'Final Total Loss':<18} {'Final Loss u':<18} {'Final Loss v':<18}")
         print("-"*70)

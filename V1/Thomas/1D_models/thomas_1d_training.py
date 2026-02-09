@@ -698,9 +698,9 @@ class Thomas1DQPINNTrainer:
     
     def _postprocess_output(self, raw_output):
         """Scale quantum outputs to physical range"""
-        # u in [0, 20], v in [0, 20] (based on reference)
-        u_scaled = raw_output[:, 0] * 10.0 + 10.0
-        v_scaled = raw_output[:, 1] * 10.0 + 10.0
+        # u in [0.0547, 5.0100], v in [8.9548, 29.6516] (based on reference)
+        u_scaled = raw_output[:, 0] * 2.47765 + 2.53235
+        v_scaled = raw_output[:, 1] * 10.3484 + 19.3032
         return torch.stack([u_scaled, v_scaled], dim=1)
     
     def model(self, x):
