@@ -107,6 +107,10 @@ class Config:
     HIDDEN_LAYERS_FNN = 2
     NEURONS_FNN = 16
     
+    # PINN-specific Parameters
+    PINN_HIDDEN_LAYERS = 4
+    PINN_NEURONS = 50
+    
     # QNN Embedding Parameters
     N_LAYERS_EMBED = 2
     
@@ -266,7 +270,7 @@ class LengyelEpstein2DQPINNInference:
             self.qnn_embedding.load_state_dict(model_state['qnn_embedding'])
             self.qnn_embedding.eval(); self.circuit = self._create_circuit()
         else:
-            self.pinn = FNNBasisNet(self.config.HIDDEN_LAYERS_FNN, self.config.NEURONS_FNN, 2).to(self.device)
+            self.pinn = FNNBasisNet(self.config.PINN_HIDDEN_LAYERS, self.config.PINN_NEURONS, 2).to(self.device)
             self.pinn.load_state_dict(torch.load(model_path, map_location=self.device, weights_only=False))
             self.pinn.eval()
         

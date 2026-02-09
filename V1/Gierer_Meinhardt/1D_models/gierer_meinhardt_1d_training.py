@@ -66,6 +66,10 @@ class Config:
     # QNN Embedding Parameters
     N_LAYERS_EMBED = 2
     
+    # PINN-specific Parameters
+    PINN_HIDDEN_LAYERS = 4
+    PINN_NEURONS = 50
+    
     # Domain Parameters
     T_COLLOC_POINTS = 5
     X_COLLOC_POINTS = 10
@@ -861,8 +865,8 @@ class GiererMeinhardt1DQPINNTrainer:
 
         else:  # NONE (PINN)
             self.pinn = FNNBasisNet(
-                self.config.HIDDEN_LAYERS_FNN,
-                self.config.NEURONS_FNN,
+                self.config.PINN_HIDDEN_LAYERS,
+                self.config.PINN_NEURONS,
                 2,  # Output: u, v
                 input_dim=2
             ).to(self.device)
@@ -901,10 +905,17 @@ class GiererMeinhardt1DQPINNTrainer:
         def extract_v(multi_output):
             return multi_output[:, 1] if multi_output.dim() > 1 else multi_output[1]
         
+        previous_loss = float('inf')
         for epoch in range(iterations):
             optimizer.step(closure)
             current_loss = total_loss_fn().item()
             metrics = compute_metrics_fn()
+            
+            # Early stopping
+            if abs(previous_loss - current_loss) < 1e-10:
+                print("Early stopping: Loss change < 1e-10")
+                break
+            previous_loss = current_loss
             
             # Compute separate losses for u and v
             pred = self.model(self.interior_colloc)

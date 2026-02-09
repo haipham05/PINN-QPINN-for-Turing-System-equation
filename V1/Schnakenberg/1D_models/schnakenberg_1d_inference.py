@@ -120,10 +120,13 @@ class Config:
     N_WIRES = 4
     
     # FNN Basis Parameters
-    HIDDEN_LAYERS_FNN = 3
-    NEURONS_FNN = 32
+    HIDDEN_LAYERS_FNN = 2
+    NEURONS_FNN = 20
     
-    # QNN Embedding Parameters
+    # PINN-specific Parameters
+    PINN_HIDDEN_LAYERS = 4
+    PINN_NEURONS = 50
+        # QNN Embedding Parameters
     N_LAYERS_EMBED = 2
     
     # Physics Parameters
@@ -246,9 +249,9 @@ class Schnakenberg1DQPINNInference:
         """Load reference solution interpolators and setup evaluation grid"""
         if os.path.exists(ref_path):
             loaded = np.load(ref_path, allow_pickle=True)[()]
-            # Handle both naming conventions
-            self.interp_u = loaded.get('u_sol', loaded.get('u'))
-            self.interp_v = loaded.get('v_sol', loaded.get('v'))
+            # Load pre-built interpolators
+            self.interp_u = loaded['u']
+            self.interp_v = loaded['v']
             print("✓ 1D Reference solution loaded successfully")
         else:
             raise FileNotFoundError(f"Reference solution not found: {ref_path}")
@@ -256,6 +259,8 @@ class Schnakenberg1DQPINNInference:
         # Create evaluation grid from config parameters (independent of reference)
         self.T_unique = np.linspace(self.config.T_MIN, self.config.T_MAX, self.config.T_EVAL_POINTS)
         self.X_unique = np.linspace(self.config.X_MIN, self.config.X_MAX, self.config.X_EVAL_POINTS)
+        
+        print(f"   Evaluation grid: t={self.config.T_EVAL_POINTS} points, x={self.config.X_EVAL_POINTS} points")
         
         print(f"   Evaluation grid: t={self.config.T_EVAL_POINTS} points, x={self.config.X_EVAL_POINTS} points")
     
@@ -345,8 +350,8 @@ class Schnakenberg1DQPINNInference:
             
         else:  # NONE (PINN)
             self.pinn = FNNBasisNet(
-                self.config.HIDDEN_LAYERS_FNN,
-                self.config.NEURONS_FNN,
+                self.config.PINN_HIDDEN_LAYERS,
+                self.config.PINN_NEURONS,
                 2,
                 input_dim=2
             ).to(self.device)
@@ -370,8 +375,8 @@ class Schnakenberg1DQPINNInference:
         
         # Get reference
         grid_np = grid_points.cpu().numpy()
-        ref_u = np.array([self.interp_u([pt[0], pt[1]]).squeeze() for pt in grid_np])
-        ref_v = np.array([self.interp_v([pt[0], pt[1]]).squeeze() for pt in grid_np])
+        ref_u = np.array([self.interp_u([pt[0], pt[1]]) for pt in grid_np]).squeeze()
+        ref_v = np.array([self.interp_v([pt[0], pt[1]]) for pt in grid_np]).squeeze()
         
         # Compute metrics
         mse_u = np.mean((pred_u - ref_u) ** 2)

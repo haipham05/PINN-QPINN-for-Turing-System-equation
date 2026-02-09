@@ -131,6 +131,10 @@ class Config:
     # QNN Embedding Parameters
     N_LAYERS_EMBED = 2
     
+    # PINN-specific Parameters
+    PINN_HIDDEN_LAYERS = 4
+    PINN_NEURONS = 50
+    
     # Domain Parameters
     T_COLLOC_POINTS = 10
     X_COLLOC_POINTS = 5
@@ -539,7 +543,7 @@ class LengyelEpstein2DQPINNTrainer:
             self.circuit = self._create_circuit()
             params = [self.theta] + list(self.qnn_embedding.parameters())
         else:
-            self.pinn = FNNBasisNet(self.config.HIDDEN_LAYERS_FNN, self.config.NEURONS_FNN, 2).to(self.device)
+            self.pinn = FNNBasisNet(self.config.PINN_HIDDEN_LAYERS, self.config.PINN_NEURONS, 2).to(self.device)
             params = list(self.pinn.parameters())
         
         optimizer = torch.optim.LBFGS(params, line_search_fn="strong_wolfe")
@@ -550,11 +554,20 @@ class LengyelEpstein2DQPINNTrainer:
         
         loss_history, mse_u_history, mse_v_history = [], [], []
         start_time = time.time()
+        previous_loss = float('inf')
         for epoch in range(iterations):
             optimizer.step(closure)
             metrics = compute_metrics_fn()
-            loss_history.append(total_loss_fn().item())
-            mse_u_history.append(metrics['mse_u']); mse_v_history.append(metrics['mse_v'])
+            current_loss = total_loss_fn().item()
+            loss_history.append(current_loss)
+            mse_u_history.append(metrics['mse_u'])
+            mse_v_history.append(metrics['mse_v'])
+            
+            # Early stopping
+            if abs(previous_loss - current_loss) < 1e-10:
+                print("Early stopping: Loss change < 1e-10")
+                break
+            previous_loss = current_loss
             if epoch % 10 == 0 or epoch == iterations - 1:
                 print(f"Epoch {epoch:04d} | Loss: {loss_history[-1]:.2E} | MSE_u: {metrics['mse_u']:.2E} | MSE_v: {metrics['mse_v']:.2E}")
         

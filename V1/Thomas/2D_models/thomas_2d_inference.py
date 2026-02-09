@@ -150,6 +150,10 @@ class Config:
     HIDDEN_LAYERS_FNN = 2
     NEURONS_FNN = 16
     
+    # PINN-specific Parameters
+    PINN_HIDDEN_LAYERS = 4
+    PINN_NEURONS = 50
+    
     # QNN Embedding Parameters
     N_LAYERS_EMBED = 2
     
@@ -386,8 +390,8 @@ class Thomas2DQPINNInference:
             
         else:  # NONE (PINN)
             self.pinn = FNNBasisNet(
-                self.config.HIDDEN_LAYERS_FNN,
-                self.config.NEURONS_FNN,
+                self.config.PINN_HIDDEN_LAYERS,
+                self.config.PINN_NEURONS,
                 2,
                 input_dim=3
             ).to(self.device)

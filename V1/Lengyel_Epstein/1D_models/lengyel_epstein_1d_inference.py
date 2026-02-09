@@ -65,6 +65,8 @@ class Config:
     N_WIRES = 4
     HIDDEN_LAYERS_FNN = 2
     NEURONS_FNN = 20
+    PINN_HIDDEN_LAYERS = 4
+    PINN_NEURONS = 50
     N_LAYERS_EMBED = 2
     D_U = 1.0
     D_V = 10.0
@@ -144,11 +146,18 @@ class LengyelEpstein1DQPINNInference:
     def load_reference(self, ref_path):
         if os.path.exists(ref_path):
             loaded = np.load(ref_path, allow_pickle=True)[()]
-            self.interp_u, self.interp_v = loaded.get('u_sol', loaded.get('u')), loaded.get('v_sol', loaded.get('v'))
-            print("✓ 1D Reference solution loaded")
-        else: raise FileNotFoundError(f"Reference not found: {ref_path}")
+            # Load pre-built interpolators
+            self.interp_u = loaded['u']
+            self.interp_v = loaded['v']
+            print("✓ 1D Reference solution loaded successfully")
+        else:
+            raise FileNotFoundError(f"Reference solution not found: {ref_path}")
+        
+        # Create evaluation grid from config parameters (independent of reference)
         self.T_unique = np.linspace(self.config.T_MIN, self.config.T_MAX, self.config.T_EVAL_POINTS)
         self.X_unique = np.linspace(self.config.X_MIN, self.config.X_MAX, self.config.X_EVAL_POINTS)
+        
+        print(f"   Evaluation grid: t={self.config.T_EVAL_POINTS} points, x={self.config.X_EVAL_POINTS} points")
 
     def _create_circuit(self):
         dev = qml.device("default.qubit", wires=self.config.N_WIRES)
@@ -196,7 +205,7 @@ class LengyelEpstein1DQPINNInference:
             self.qnn_embedding.load_state_dict(state['qnn_embedding']); self.qnn_embedding.eval()
             self.circuit = self._create_circuit()
         else:
-            self.pinn = FNNBasisNet(self.config.HIDDEN_LAYERS_FNN, self.config.NEURONS_FNN, 2).to(self.device)
+            self.pinn = FNNBasisNet(self.config.PINN_HIDDEN_LAYERS, self.config.PINN_NEURONS, 2).to(self.device)
             self.pinn.load_state_dict(torch.load(model_path, map_location=self.device, weights_only=False)); self.pinn.eval()
         
         grid = torch.tensor(list(product(self.T_unique, self.X_unique)), dtype=torch.float32, device=self.device)
@@ -233,20 +242,124 @@ class InferenceVisualizer:
             plt.savefig(os.path.join(save_dir, f"plot7_{mode.lower()}_performance.png"), dpi=150); plt.close()
 
 def main():
+    # Configuration
     config = Config()
+    
+    # Device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    engine = LengyelEpstein1DQPINNInference(config, device)
-    engine.load_reference(os.path.join(config.INPUT_DIR, "lengyel_epstein_reference_solution.npy"))
-    results = {}
-    for mode, folder, filename in [("NONE", "pinn", "model.pth"), ("FNN_BASIS", "fnn_basis", "model.npy"), ("QNN", "qnn", "model.npy")]:
-        path = os.path.join(config.INPUT_DIR, folder, filename)
-        if os.path.exists(path):
-            results[mode] = engine.inference(path, mode)
-            if mode in ["FNN_BASIS", "QNN"]:
-                plot_quantum_circuit(engine.circuit, mode, config, config.OUTPUT_DIR)
-                if mode == "QNN": plot_qnn_embedding_circuit(engine.qnn_embedding, config, config.OUTPUT_DIR)
-    visualizer = InferenceVisualizer(engine, results)
-    visualizer.plot_performance(config.OUTPUT_DIR)
-    print("\n=== INFERENCE COMPLETE ===")
+    print(f"Using device: {device}")
+    
+    os.makedirs(config.OUTPUT_DIR, exist_ok=True)
+    
+    print("\n" + "="*80)
+    print("LENGYEL-EPSTEIN 1D QPINN INFERENCE")
+    print("="*80)
+    
+    # Initialize inference engine
+    inference_engine = LengyelEpstein1DQPINNInference(config, device)
+    
+    # Load reference
+    ref_path = os.path.join(config.INPUT_DIR, "lengyel_epstein_reference_solution.npy")
+    inference_engine.load_reference(ref_path)
+    
+    # Run inference for all models
+    embedding_results = {}
+    
+    model_configs = [
+        ("NONE", "pinn", "model.pth"),
+        ("FNN_BASIS", "fnn_basis", "model.npy"),
+        ("QNN", "qnn", "model.npy"),
+    ]
+    
+    for embedding_type, folder, filename in model_configs:
+        model_path = os.path.join(config.INPUT_DIR, folder, filename)
+        
+        # Check for backward compatibility
+        if not os.path.exists(model_path):
+            alt_folder = "none" if folder == "pinn" else folder
+            model_path = os.path.join(config.INPUT_DIR, alt_folder, filename)
+        
+        if os.path.exists(model_path):
+            results = inference_engine.inference(model_path, embedding_type)
+            embedding_results[embedding_type] = results
+            
+            # Plot quantum circuits for FNN and QNN
+            if embedding_type in ["FNN_BASIS", "QNN"]:
+                # Plot main circuit
+                if embedding_type == "FNN_BASIS":
+                    dev = qml.device("default.qubit", wires=config.N_WIRES)
+                    @qml.qnode(dev, interface="torch")
+                    def circuit(x, theta, basis):
+                        for i in range(config.N_WIRES):
+                            if i % 2 == 0:
+                                qml.RY(basis[i] * x[0], wires=i)
+                            else:
+                                qml.RY(basis[i] * x[1], wires=i)
+                        for layer in range(config.N_LAYERS):
+                            for qubit in range(config.N_WIRES):
+                                qml.RX(theta[layer, qubit, 0], wires=qubit)
+                                qml.RY(theta[layer, qubit, 1], wires=qubit)
+                                qml.RZ(theta[layer, qubit, 2], wires=qubit)
+                            for qubit in range(config.N_WIRES - 1):
+                                qml.CNOT(wires=[qubit, qubit + 1])
+                        return [qml.expval(qml.PauliZ(0)), qml.expval(qml.PauliZ(1))]
+                    try:
+                        plot_quantum_circuit(circuit, "FNN_BASIS", config, config.OUTPUT_DIR)
+                    except Exception as e:
+                        print(f"⚠ Could not generate FNN circuit plot: {e}")
+                
+                elif embedding_type == "QNN":
+                    dev = qml.device("default.qubit", wires=config.N_WIRES)
+                    @qml.qnode(dev, interface="torch")
+                    def circuit(x, theta, basis):
+                        for i in range(config.N_WIRES):
+                            if i % 2 == 0:
+                                qml.RX(x[0], wires=i)
+                            else:
+                                qml.RY(x[1], wires=i)
+                        for layer in range(config.N_LAYERS):
+                            for qubit in range(config.N_WIRES):
+                                qml.RX(theta[layer, qubit, 0], wires=qubit)
+                                qml.RY(theta[layer, qubit, 1], wires=qubit)
+                                qml.RZ(theta[layer, qubit, 2], wires=qubit)
+                            for qubit in range(config.N_WIRES - 1):
+                                qml.CNOT(wires=[qubit, qubit + 1])
+                        return [qml.expval(qml.PauliZ(0)), qml.expval(qml.PauliZ(1))]
+                    try:
+                        plot_quantum_circuit(circuit, "QNN", config, config.OUTPUT_DIR)
+                    except Exception as e:
+                        print(f"⚠ Could not generate QNN circuit plot: {e}")
+                    
+                    # Plot QNN embedding circuit
+                    if hasattr(inference_engine, 'qnn_embedding'):
+                        try:
+                            plot_qnn_embedding_circuit(inference_engine.qnn_embedding, config, config.OUTPUT_DIR)
+                        except Exception as e:
+                            print(f"⚠ Could not generate QNN embedding circuit plot: {e}")
+        else:
+            print(f"⚠ Model not found: {model_path}")
+    
+    # Visualizations
+    visualizer = InferenceVisualizer(inference_engine, embedding_results)
+    
+    # === Plot 7 & 8: Performance and Time Evolution ===
+    visualizer.plot_performance_analysis(config.OUTPUT_DIR)
+    visualizer.plot_time_evolution(config.OUTPUT_DIR, t_max=1.0)
+    visualizer.print_summary()
+    
+    # Save results
+    with open(os.path.join(config.OUTPUT_DIR, 'inference_results.pkl'), 'wb') as f:
+        pickle.dump(embedding_results, f)
+    
+    print(f"\n✓ Inference results saved: {config.OUTPUT_DIR}/inference_results.pkl")
+    
+    print("\n" + "="*80)
+    print("INFERENCE COMPLETE!")
+    print("="*80)
+    print("Generated Plots:")
+    print("  - plot3_quantum_circuit_*.png (FNN and QNN circuits)")
+    print("  - plot7_performance_*.png (for each model)")
+    print("  - plot8_time_evolution_*.png (for u and v)")
+    print("="*80)
 
 if __name__ == "__main__": main()

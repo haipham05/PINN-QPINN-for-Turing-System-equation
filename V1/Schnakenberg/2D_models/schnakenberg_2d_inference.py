@@ -149,8 +149,10 @@ class Config:
     # FNN Basis Parameters
     HIDDEN_LAYERS_FNN = 3
     NEURONS_FNN = 32
-    
-    # QNN Embedding Parameters
+        # PINN-specific Parameters
+    PINN_HIDDEN_LAYERS = 4
+    PINN_NEURONS = 50
+        # QNN Embedding Parameters
     N_LAYERS_EMBED = 2
     
     # Physics Parameters
@@ -384,8 +386,8 @@ class Schnakenberg2DQPINNInference:
             
         else:  # NONE (PINN)
             self.pinn = FNNBasisNet(
-                self.config.HIDDEN_LAYERS_FNN,
-                self.config.NEURONS_FNN,
+                self.config.PINN_HIDDEN_LAYERS,
+                self.config.PINN_NEURONS,
                 2,
                 input_dim=3
             ).to(self.device)
@@ -667,7 +669,7 @@ def main():
     print("="*80)
     
     # Initialize inference engine
-    inference_engine = Brusselator2DQPINNInference(config, device)
+    inference_engine = Schnakenberg2DQPINNInference(config, device)
     
     # Load reference
     ref_path = os.path.join(config.INPUT_DIR, "schnakenberg_3d_reference_solution.npy")
